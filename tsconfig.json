@@ -15,7 +15,21 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "types": ["node", "vitest/globals"]
+    "types": [
+      "node",
+      "vitest/globals",
+      "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers/types"
+    ]
   },
-  "include": ["src", "server", "scripts", "tests", "vite.config.ts", "eslint.config.js"]
+  "include": [
+    "src",
+    "server",
+    "worker",
+    "scripts",
+    "tests",
+    "vite.config.ts",
+    "vitest.config.ts",
+    "eslint.config.js"
+  ]
 }

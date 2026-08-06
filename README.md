@@ -1,168 +1,238 @@
 # Timekeeper
 
-A private, shared-password timekeeping application for an individual or small firm. It records precise UTC timestamps in PostgreSQL, presents them in `Australia/Brisbane`, restores a running timer after refresh, and produces print-ready Monday-to-Sunday Excel reports.
+A private, shared-password timekeeping application built for Cloudflare Workers. One Worker serves the React interface and protected API, Cloudflare D1 stores all durable data, and a Cron Trigger sends the completed Monday-to-Sunday Excel report every Monday at 12:05 AM Brisbane time.
 
 ## Features
 
-- Server-side shared-password authentication, persistent secure sessions, logout, CSRF protection, and sign-in rate limiting
-- One recoverable running timer, project/activity reuse or creation, optional notes, and manual entries
+- Server-side shared-password authentication using PBKDF2-SHA256
+- Random, hashed, D1-backed sessions with secure `HttpOnly` cookies and CSRF protection
+- D1-backed login throttling after repeated password failures
+- One database-enforced active timer, restored after refresh or reopening the site
+- Reusable or newly entered projects, optional notes, and manual completed entries
 - Edit and confirmed deletion of completed entries
-- Today, current-week, date-filtered history, weekly totals, and per-project totals
-- Correct allocation of cross-midnight entries to Brisbane calendar days
-- Authenticated `.xlsx` report download with daily details/totals, project totals, and a weekly total
-- Idempotent scheduled/test email deliveries with success/failure records in PostgreSQL
-- Responsive desktop and mobile interface
+- Brisbane-aware today, weekly, history, filtered, and per-project totals
+- Correct date allocation for entries crossing Brisbane midnight
+- Protected, print-ready Excel workbook downloads
+- Manual test-email button with delivery records isolated from scheduled reports
+- Resend HTTP email delivery with provider and D1 idempotency protection
+- Cloudflare Cron execution and automatic cleanup of expired security records
 
-## Architecture
+## Cloudflare architecture
 
-- React, TypeScript, and Vite client
-- Express API and server-side sessions
-- PostgreSQL persistence and SQL migrations
-- ExcelJS workbook generation
-- SMTP delivery through Nodemailer (Resend SMTP is the recommended provider)
-- Docker deployment to Render, Neon PostgreSQL, and GitHub Actions scheduling
+- **Frontend:** React, TypeScript, and Vite; served through Worker Static Assets
+- **API:** Hono running in Cloudflare Workers
+- **Database:** Cloudflare D1
+- **Authentication:** PBKDF2 password hash stored as a Worker secret; random server-side sessions stored hashed in D1
+- **Reports:** ExcelJS, bundled and executed in the Worker runtime
+- **Email:** Resend HTTPS API with Excel attachment
+- **Schedule:** Cloudflare Cron Trigger at `5 14 * * 0` UTC
 
-The application never uses browser local storage as its source of truth. Timestamps remain UTC in PostgreSQL; Brisbane conversion occurs at API/report boundaries.
+The Worker dry-run bundle is well under Cloudflare's compressed Worker-size limit. Because password verification and Excel generation are CPU-heavy compared with an ordinary request, the Workers Paid plan is recommended for predictable production operation.
 
-## Local setup
+## Required accounts
 
-Requirements: Node.js 22+, npm, and PostgreSQL 15+.
+1. A Cloudflare account with Workers enabled. The Workers Paid plan is recommended.
+2. A Resend account, a verified sending domain, and a sending-only API key.
+3. Access to this GitHub repository or a local clone.
 
-1. Install packages:
+## Deploy today
 
-   ```powershell
-   npm ci
-   ```
+### 1. Install and authenticate
 
-2. Copy `.env.example` to an untracked `.env` and provide the variables below. Node does not load `.env` automatically; load the values in your shell or use your preferred local environment loader.
-
-3. Generate the password hash without adding the plaintext password to a file or command argument:
-
-   ```powershell
-   $env:TIMEKEEPING_PASSWORD = Read-Host -MaskInput "Shared password"
-   $env:APP_PASSWORD_HASH = npm run --silent password:hash
-   Remove-Item Env:TIMEKEEPING_PASSWORD
-   ```
-
-4. Generate a strong session secret (at least 32 characters), for example:
-
-   ```powershell
-   $bytes = New-Object byte[] 48
-   [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-   $env:SESSION_SECRET = [Convert]::ToBase64String($bytes)
-   ```
-
-5. Set `DATABASE_URL`, apply migrations, and run the API:
-
-   ```powershell
-   npm run migrate
-   npm run dev
-   ```
-
-6. In another terminal, run the Vite client and open `http://localhost:5173`:
-
-   ```powershell
-   npm run dev:client
-   ```
-
-For a production-style local run, use `npm run build` followed by `npm start`, then open the API port (default `http://localhost:3000`). Startup also applies pending migrations safely.
-
-## Environment variables
-
-| Variable                  | Required      | Purpose                                                                               |
-| ------------------------- | ------------- | ------------------------------------------------------------------------------------- |
-| `DATABASE_URL`            | Yes           | PostgreSQL connection string; must be reachable by the web service and GitHub Actions |
-| `APP_PASSWORD_HASH`       | Yes           | Output of `npm run password:hash`; never the plaintext password                       |
-| `SESSION_SECRET`          | Yes           | Random value of at least 32 characters used to sign session cookies                   |
-| `PORT`                    | Host-defined  | HTTP port; defaults to `3000`                                                         |
-| `SMTP_HOST`               | Email jobs    | SMTP hostname, such as `smtp.resend.com`                                              |
-| `SMTP_PORT`               | Email jobs    | Usually `587` (STARTTLS) or `465` (implicit TLS)                                      |
-| `SMTP_SECURE`             | Email jobs    | `true` for implicit TLS/465, otherwise `false`                                        |
-| `SMTP_USER`               | Email jobs    | SMTP user/provider identifier                                                         |
-| `SMTP_PASSWORD`           | Email jobs    | SMTP/API credential                                                                   |
-| `SMTP_FROM`               | Email jobs    | Verified sender, such as `Timekeeper <reports@your-domain.example>`                   |
-| `WEEKLY_REPORT_RECIPIENT` | Scheduled job | Production report recipient                                                           |
-| `REPORT_TEST_RECIPIENT`   | Test job      | Safe inbox for test delivery                                                          |
-
-`.env.example` contains blank placeholders only. Do not commit `.env`, passwords, database URLs, session secrets, or SMTP credentials.
-
-## Database and migrations
-
-Run:
+Install Node.js 22 or later, then run:
 
 ```powershell
-npm run migrate
+npm ci
+npx wrangler login
 ```
 
-The migration creates projects, precise time entries, PostgreSQL-backed sessions, delivery audit records, and a unique partial index that enforces only one active timer even under concurrent requests. Applied migration filenames are recorded in `schema_migrations`.
+`wrangler login` opens Cloudflare authorization in the browser. Verify the active account with:
 
-## Weekly Excel reports
+```powershell
+npx wrangler whoami
+```
 
-The Reports screen accepts any date and normalizes it to that Brisbane week’s Monday. The workbook contains each applicable date, clock-in/out, duration, project, notes, daily totals, project totals, and the entire-week total. Cross-midnight entries are split at Brisbane midnight while retaining the original timestamps in the database.
+### 2. Create the D1 database
 
-The authenticated endpoint is:
+```powershell
+npm run db:create
+```
+
+The command prints a `database_id`. Replace the placeholder UUID in `wrangler.jsonc` under `d1_databases[0].database_id` with that value.
+
+Apply the production schema:
+
+```powershell
+npm run db:migrate
+```
+
+Wrangler records each applied file from `migrations-d1` in D1's migration table. Production migration application is transactional and captures a database backup.
+
+### 3. Generate the requested shared-password hash
+
+Do not put the plaintext password in the repository, a command argument, `.dev.vars`, or a Cloudflare variable. Generate the PBKDF2 hash locally without echoing the password:
+
+```powershell
+$env:TIMEKEEPING_PASSWORD = Read-Host -MaskInput "Shared password"
+$passwordHash = npm run --silent password:hash
+Remove-Item Env:TIMEKEEPING_PASSWORD
+```
+
+Create a temporary, ignored secrets file from the tracked placeholder:
+
+```powershell
+Copy-Item .dev.vars.example .production.secrets
+```
+
+Put the generated hash after `APP_PASSWORD_HASH=` in `.production.secrets`, then clear the shell variable:
+
+```powershell
+Remove-Variable passwordHash
+```
+
+### 4. Configure the remaining secrets
+
+Fill the remaining blank values in `.production.secrets`.
+
+Use:
+
+- `EMAIL_FROM`: a sender on the domain verified by Resend, for example `Timekeeper <reports@your-domain.example>`
+- `WEEKLY_REPORT_RECIPIENT`: the required production report mailbox
+- `REPORT_TEST_RECIPIENT`: an inbox you can safely inspect during setup
+
+The file is excluded by `.gitignore`. Never commit it, attach it to an issue, or share it in screenshots. The repository and Wrangler configuration contain secret names only.
+
+### 5. Deploy
+
+```powershell
+npm run build:client
+npx wrangler deploy --secrets-file .production.secrets
+```
+
+Wrangler builds the React client, bundles the API Worker, uploads the static assets, attaches D1, and configures the Cron Trigger. It prints a `workers.dev` URL when deployment succeeds.
+
+After deployment, remove the temporary local secrets file:
+
+```powershell
+Remove-Item -LiteralPath .production.secrets
+```
+
+Cloudflare retains the encrypted secrets. Later `npm run deploy` calls preserve them. To rotate one value, run `npx wrangler secret put SECRET_NAME` and enter its new value at the prompt.
+
+Verify the backend:
+
+```powershell
+Invoke-RestMethod https://YOUR-WORKER.workers.dev/api/health
+```
+
+Expected response:
+
+```json
+{
+  "status": "ok",
+  "runtime": "cloudflare-workers",
+  "database": "d1",
+  "timezone": "Australia/Brisbane"
+}
+```
+
+### 6. Verify the complete workflow
+
+1. Open the `workers.dev` URL and enter the shared password.
+2. Enter or choose a project and clock in.
+3. Clock out.
+4. Edit the resulting entry.
+5. Confirm the Today and This Week totals.
+6. Open Reports and download the workbook.
+7. Open it in Microsoft Excel and inspect its rows, totals, widths, and print layout.
+8. Set `REPORT_TEST_RECIPIENT` to your inbox and click **Send test email**.
+9. Click it again and confirm the application reports that no duplicate was created.
+
+Test delivery uses `delivery_type=test`; the automated job uses `delivery_type=scheduled`. Sending a test can never consume the scheduled delivery record.
+
+### 7. Optional custom domain
+
+In Cloudflare Dashboard:
+
+1. Open **Workers & Pages**.
+2. Select **timekeeper**.
+3. Open **Settings → Domains & Routes**.
+4. Add a custom domain managed by the same Cloudflare account.
+
+No application configuration changes are needed after the domain is attached.
+
+## Weekly schedule
+
+`wrangler.jsonc` defines:
 
 ```text
-GET /api/reports/weekly.xlsx?weekStart=YYYY-MM-DD
+5 14 * * 0
 ```
 
-## Email configuration and testing
+Cloudflare Cron uses UTC. Brisbane remains UTC+10 throughout the year, so Sunday 14:05 UTC is Monday 12:05 AM Brisbane time. The handler selects the Monday-to-Sunday week that has just ended.
 
-The recommended provider is Resend SMTP: verify a sending domain, create an SMTP credential, then map it to `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM`. Generic TLS-enabled SMTP providers work as well.
+Delivery safety has three layers:
 
-To send a test delivery for the previous completed week:
+1. D1 allows only one record per week and delivery type.
+2. A sent record is never claimed again; a failed record may be retried.
+3. Resend receives a deterministic `Idempotency-Key` for each week and delivery type.
+
+Delivery status, attempt count, provider message ID, error message, recipient, and sent time are retained in D1. Worker observability is enabled for runtime and Cron logs.
+
+## Local development
+
+Copy `.dev.vars.example` to `.dev.vars` and use non-production values. `.dev.vars` is ignored by Git.
+
+Create the local D1 schema and start Wrangler:
 
 ```powershell
-npm run report:test-email
+npm run db:migrate:local
+npm run dev
 ```
 
-To test a specific week:
+The first `npm run dev` builds the frontend and starts the Worker at the URL shown by Wrangler. Local D1 state is stored below the ignored `.wrangler` directory.
+
+Do not use the production Resend API key or production recipient for ordinary local testing.
+
+## Environment and secret bindings
+
+| Binding                   | Type                  | Required | Purpose                                                     |
+| ------------------------- | --------------------- | -------- | ----------------------------------------------------------- |
+| `DB`                      | D1 binding            | Yes      | Projects, entries, sessions, login attempts, and deliveries |
+| `ASSETS`                  | Static Assets binding | Yes      | Built React application                                     |
+| `APP_PASSWORD_HASH`       | Secret                | Yes      | PBKDF2 hash of the shared password                          |
+| `RESEND_API_KEY`          | Secret                | Yes      | Sending-only Resend credential                              |
+| `EMAIL_FROM`              | Secret                | Yes      | Verified report sender                                      |
+| `WEEKLY_REPORT_RECIPIENT` | Secret                | Yes      | Production weekly recipient                                 |
+| `REPORT_TEST_RECIPIENT`   | Secret                | Yes      | Safe manual-test recipient                                  |
+
+## D1 migrations
 
 ```powershell
-npm run report:test-email -- --week=2026-08-03
+npm run db:migrate:local  # local Wrangler database
+npm run db:migrate        # production D1 database
 ```
 
-Test deliveries use `REPORT_TEST_RECIPIENT` and a separate `delivery_type=test` idempotency record, so they cannot consume or duplicate the scheduled delivery. A successful repeated test for the same week is skipped. Failed deliveries are recorded and may be retried. When Resend SMTP is used, the sender also supplies a deterministic `Resend-Idempotency-Key` for provider-side retry protection.
+The initial migration creates:
 
-In GitHub, **Actions → Weekly time report → Run workflow** provides the same test path. Keep `delivery` set to `test`. Choosing `scheduled` intentionally uses the production recipient and production idempotency record.
+- case-insensitive reusable projects;
+- precise UTC millisecond timestamps;
+- a unique active-timer guard enforced by D1;
+- hashed session records;
+- persisted login-attempt windows;
+- idempotent weekly-delivery audit records.
 
-## Brisbane weekly schedule
-
-`.github/workflows/weekly-report.yml` runs at `5 14 * * 0` UTC. Brisbane is UTC+10 without daylight saving, so this is Monday 12:05 AM Brisbane time, after the Sunday week has ended. The script automatically selects the Monday-to-Sunday week that just finished.
-
-The job and database both enforce duplicate protection:
-
-- GitHub Actions uses one non-cancelling concurrency group.
-- PostgreSQL has one delivery record per `(week_start, delivery_type)`.
-- Resend receives a stable provider-side idempotency key for each week and delivery type.
-- A sent report is never sent again by a retry; a failed report can be retried.
-- Status, attempts, recipient, error message, and sent timestamp are retained.
-
-GitHub Actions is appropriate here only because the selected Neon database accepts secure external connections. If a future database is private to its hosting network, move the same `npm run report:send` command to that provider’s scheduled-job service.
-
-## Deployment: Render + Neon + Resend
-
-1. Create a Neon PostgreSQL project in an Australian or nearby region. Copy its pooled connection string.
-2. In Render, create a **Web Service** from this repository and select **Docker**. The included `Dockerfile` builds and starts the app; health path is `/api/health`.
-3. In Render, add `DATABASE_URL`, `APP_PASSWORD_HASH`, and `SESSION_SECRET` as secret environment values. Set `NODE_ENV=production`. Do not add the SMTP values to Render unless you also plan to run email jobs there.
-4. Deploy. The service applies migrations before accepting requests. Render supplies `PORT` automatically and terminates HTTPS; production cookies are `Secure`, `HttpOnly`, and `SameSite=Strict`.
-5. In the GitHub repository, open **Settings → Secrets and variables → Actions** and add:
-   - `DATABASE_URL`
-   - `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`
-   - `WEEKLY_REPORT_RECIPIENT` (set to the required production mailbox)
-   - `REPORT_TEST_RECIPIENT` (set to an inbox you can safely inspect)
-6. Run the workflow manually with `delivery=test`. Confirm receipt and inspect the workbook before relying on the weekly schedule.
-7. Clock a short entry through the deployed site, then download its report to verify that the web service and scheduled job share the same database.
-
-On Render’s free tier the web service may sleep, but GitHub Actions connects directly to Neon, so scheduled reporting does not depend on the web service being awake. Review current provider plans, retention, and regional availability before production use.
+Times remain precise UTC timestamps in D1. Australia/Brisbane conversion occurs only for display, filtering, date allocation, and reports.
 
 ## Backup and export
 
-- Treat the Excel report as a convenient business export, not the only backup.
-- Enable Neon’s point-in-time restore/retention appropriate to the plan.
-- Periodically take a PostgreSQL backup with `pg_dump "$env:DATABASE_URL" --format=custom --file timekeeper.backup` and store it encrypted outside the repository.
-- Verify a restore periodically in a separate database.
-- Download weekly Excel files for normal recordkeeping.
+D1 Time Travel provides point-in-time recovery. Also take periodic portable exports:
+
+```powershell
+npx wrangler d1 export timekeeper --remote --output timekeeper-backup.sql
+```
+
+Store exported files encrypted outside the repository. `*.sql` backup filenames should not be committed. Excel reports are useful business exports but are not a complete database backup.
 
 ## Quality checks
 
@@ -174,4 +244,16 @@ npm test
 npm run build
 ```
 
-Tests cover protected routes and sessions, clock-in/out, the one-active-timer rule, manual validation/edit/delete, duration clipping, Brisbane week boundaries, cross-midnight allocation, Excel workbook contents, weekly totals, failed-email retry, and duplicate-email prevention.
+The test suite runs inside Cloudflare's `workerd` runtime with real local D1 migrations. It covers:
+
+- authentication, protected routes, session recovery, CSRF, and logout;
+- persisted sign-in throttling;
+- clock-in/out and database-enforced active-timer exclusion;
+- manual add, edit, delete, and server validation;
+- Brisbane timezone and week boundaries;
+- durations, weekly/project totals, and cross-midnight allocation;
+- authenticated Excel creation and workbook parsing;
+- Resend request construction, failed-delivery retry, and duplicate prevention;
+- separation of test and scheduled delivery records.
+
+The production dry run is `npm run build`; it compiles the client and asks Wrangler to bundle and validate the Worker without deploying it.

@@ -5,7 +5,17 @@ import reactHooks from 'eslint-plugin-react-hooks';
 import reactRefresh from 'eslint-plugin-react-refresh';
 
 export default tseslint.config(
-  { ignores: ['dist', 'dist-server', 'coverage', 'node_modules'] },
+  {
+    ignores: [
+      'dist',
+      'dist-server',
+      '.wrangler',
+      '.wrangler-dist',
+      'worker-configuration.d.ts',
+      'coverage',
+      'node_modules',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

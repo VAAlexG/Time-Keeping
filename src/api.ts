@@ -13,7 +13,9 @@ export async function api<T>(path: string, options: RequestInit = {}, csrf?: str
   if (csrf) headers.set('x-csrf-token', csrf);
   const response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
   if (!response.ok) {
-    const body = await response.json().catch(() => ({ error: 'Request failed.' }));
+    const body = (await response.json().catch(() => ({ error: 'Request failed.' }))) as {
+      error?: string;
+    };
     throw new ApiError(body.error ?? 'Request failed.', response.status);
   }
   if (response.status === 204) return undefined as T;
@@ -25,8 +27,10 @@ export async function downloadReport(weekStart: string): Promise<void> {
     `/api/reports/weekly.xlsx?weekStart=${encodeURIComponent(weekStart)}`,
   );
   if (!response.ok) {
-    const body = await response.json().catch(() => ({ error: 'Report download failed.' }));
-    throw new ApiError(body.error, response.status);
+    const body = (await response.json().catch(() => ({ error: 'Report download failed.' }))) as {
+      error?: string;
+    };
+    throw new ApiError(body.error ?? 'Report download failed.', response.status);
   }
   const blob = await response.blob();
   const disposition = response.headers.get('content-disposition') ?? '';

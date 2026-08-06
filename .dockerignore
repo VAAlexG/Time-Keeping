@@ -1,8 +1,0 @@
-node_modules
-dist
-dist-server
-.git
-.env*
-coverage
-*.xlsx
-*.log
