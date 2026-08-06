@@ -434,6 +434,21 @@ nav button.selected {
   color: #668093;
   font-size: 0.82rem;
 }
+.employee-name {
+  display: block;
+  color: var(--blue);
+  font-size: 0.78rem;
+  font-weight: 600;
+  margin: 2px 0;
+}
+.signed-in-user {
+  color: #526a7c;
+  font-size: 0.82rem;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .entry-main p {
   margin: 6px 0 0;
   color: #526a7c;

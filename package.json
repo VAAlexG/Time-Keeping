@@ -13,7 +13,6 @@
     "db:create": "wrangler d1 create timekeeper",
     "db:migrate:local": "wrangler d1 migrations apply timekeeper --local",
     "db:migrate": "wrangler d1 migrations apply timekeeper --remote",
-    "password:hash": "tsx scripts/hash-password.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
@@ -27,6 +26,7 @@
   "dependencies": {
     "exceljs": "^4.4.0",
     "hono": "^4.9.6",
+    "jose": "^6.2.8",
     "luxon": "^3.7.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",

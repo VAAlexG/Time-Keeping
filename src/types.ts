@@ -5,12 +5,29 @@ export interface Project {
 
 export interface Entry {
   id: string;
+  userId: string;
+  userEmail: string;
+  userDisplayName: string;
   projectId: string;
   projectName: string;
   notes: string;
   startAt: string;
   endAt: string | null;
   durationMs?: number;
+}
+
+export interface SignedInUser {
+  id: string;
+  email: string;
+  displayName: string;
+  role: 'employee' | 'admin';
+}
+
+export interface SessionData {
+  authenticated: true;
+  csrfToken: string;
+  user: SignedInUser;
+  logoutUrl: string;
 }
 
 export interface DashboardData {

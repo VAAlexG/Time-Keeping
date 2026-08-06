@@ -4,8 +4,25 @@ export interface Project {
   createdAt: string;
 }
 
+export type UserRole = 'employee' | 'admin';
+
+export interface User {
+  id: string;
+  accessSubject: string;
+  entraObjectId: string | null;
+  email: string;
+  displayName: string;
+  role: UserRole;
+  createdAt: string;
+  updatedAt: string;
+  lastSeenAt: string;
+}
+
 export interface TimeEntry {
   id: string;
+  userId: string;
+  userEmail: string;
+  userDisplayName: string;
   projectId: string;
   projectName: string;
   notes: string;
@@ -23,23 +40,40 @@ export interface DeliveryClaim {
 }
 
 export interface TimeStore {
+  upsertUser(input: {
+    accessSubject: string;
+    entraObjectId?: string;
+    email: string;
+    displayName: string;
+    role: UserRole;
+  }): Promise<User>;
+  listUsers(): Promise<User[]>;
   listProjects(): Promise<Project[]>;
   getOrCreateProject(name: string): Promise<Project>;
-  getActiveEntry(): Promise<TimeEntry | null>;
-  clockIn(projectName: string, notes: string, now: Date): Promise<TimeEntry>;
-  clockOut(now: Date): Promise<TimeEntry | null>;
-  createEntry(input: {
-    projectName: string;
-    notes: string;
-    startAt: Date;
-    endAt: Date;
-  }): Promise<TimeEntry>;
+  getActiveEntry(userId: string): Promise<TimeEntry | null>;
+  clockIn(userId: string, projectName: string, notes: string, now: Date): Promise<TimeEntry>;
+  clockOut(userId: string, now: Date): Promise<TimeEntry | null>;
+  createEntry(
+    userId: string,
+    input: {
+      projectName: string;
+      notes: string;
+      startAt: Date;
+      endAt: Date;
+    },
+  ): Promise<TimeEntry>;
   updateEntry(
+    userId: string,
     id: string,
     input: { projectName: string; notes: string; startAt: Date; endAt: Date },
   ): Promise<TimeEntry | null>;
-  deleteEntry(id: string): Promise<boolean>;
-  listEntries(input: { from: Date; to: Date; projectId?: string }): Promise<TimeEntry[]>;
+  deleteEntry(userId: string, id: string): Promise<boolean>;
+  listEntries(input: {
+    from: Date;
+    to: Date;
+    projectId?: string;
+    userId?: string;
+  }): Promise<TimeEntry[]>;
   claimDelivery(weekStart: string, type: DeliveryType, recipient: string): Promise<DeliveryClaim>;
   markDeliverySent(
     weekStart: string,

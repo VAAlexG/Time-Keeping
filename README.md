@@ -1,167 +1,201 @@
 # Timekeeper
 
-A private, shared-password timekeeping application built for Cloudflare Workers. One Worker serves the React interface and protected API, Cloudflare D1 stores all durable data, and a Cron Trigger sends the completed Monday-to-Sunday Excel report every Monday at 12:05 AM Brisbane time.
+Timekeeper is a private firm timekeeping application built for Cloudflare Workers. Employees sign in with their existing Versatile Accounting Microsoft 365 account, record their own time, and retain one independent running timer each. Alex and Brendon have administrator reporting access across the firm.
+
+One Worker serves the React interface and Hono API, Cloudflare D1 stores durable data, and a Cron Trigger emails a consolidated Monday-to-Sunday Excel report every Monday at 12:05 AM Brisbane time.
 
 ## Features
 
-- Server-side shared-password authentication using PBKDF2-SHA256
-- Random, hashed, D1-backed sessions with secure `HttpOnly` cookies and CSRF protection
-- D1-backed login throttling after repeated password failures
-- One database-enforced active timer, restored after refresh or reopening the site
-- Reusable or newly entered projects, optional notes, and manual completed entries
-- Edit and confirmed deletion of completed entries
-- Brisbane-aware today, weekly, history, filtered, and per-project totals
-- Correct date allocation for entries crossing Brisbane midnight
-- Protected, print-ready Excel workbook downloads
-- Manual test-email button with delivery records isolated from scheduled reports
-- Resend HTTP email delivery with provider and D1 idempotency protection
-- Cloudflare Cron execution and automatic cleanup of expired security records
+- Microsoft Entra ID sign-in enforced by Cloudflare Access
+- Worker-side verification of every Cloudflare Access JWT signature, issuer, audience, and email domain
+- Automatic employee provisioning on first sign-in, using the Access subject and optional Entra object ID
+- Employee isolation for timers, entries, edits, and deletion
+- One database-enforced active timer per employee, restored after refresh or reopening
+- Shared reusable projects, optional notes, and manual completed entries
+- Brisbane-aware daily, weekly, history, filtered, and per-project totals
+- Correct allocation of entries crossing Brisbane midnight
+- Admin-only consolidated history and employee filtering
+- Admin-only print-ready Excel reports containing employee, date, times, duration, project, notes, daily totals, employee totals, project totals, and the entire-week total
+- Resend email delivery with D1 and provider idempotency protection
+- Cloudflare Cron execution at the end of the Brisbane work week
 
-## Cloudflare architecture
+## Architecture
 
-- **Frontend:** React, TypeScript, and Vite; served through Worker Static Assets
-- **API:** Hono running in Cloudflare Workers
+- **Frontend:** React, TypeScript, and Vite through Worker Static Assets
+- **API:** Hono on Cloudflare Workers
+- **Authentication:** Microsoft Entra ID through Cloudflare Access; verified again inside the Worker with `jose`
+- **Authorization:** all `@versatileaccounting.com.au` users are employees; configured admin email addresses receive reporting access
 - **Database:** Cloudflare D1
-- **Authentication:** PBKDF2 password hash stored as a Worker secret; random server-side sessions stored hashed in D1
-- **Reports:** ExcelJS, bundled and executed in the Worker runtime
-- **Email:** Resend HTTPS API with Excel attachment
-- **Schedule:** Cloudflare Cron Trigger at `5 14 * * SUN` UTC
+- **Reports:** ExcelJS in the Worker runtime
+- **Email:** Resend HTTPS API with an Excel attachment
+- **Schedule:** Cloudflare Cron Trigger `5 14 * * SUN` UTC
 
-The Worker dry-run bundle is well under Cloudflare's compressed Worker-size limit. Because password verification and Excel generation are CPU-heavy compared with an ordinary request, the Workers Paid plan is recommended for predictable production operation.
+Cloudflare Access is the outer security boundary and the Worker validates the Access application token as defense in depth. Do not deploy this version until Access is enabled for the Worker hostname and both Access validation values have been configured.
 
-## Required accounts
+## Required accounts and permissions
 
-1. A Cloudflare account with Workers enabled. The Workers Paid plan is recommended.
-2. A Resend account, a verified sending domain, and a sending-only API key.
-3. Access to this GitHub repository or a local clone.
+1. A Microsoft Entra administrator who can create an app registration, grant Graph consent, and create a client secret.
+2. A Cloudflare account with Workers, D1, and Zero Trust Access enabled.
+3. A Resend account with the sending domain verified.
+4. Node.js 22 or later and Wrangler authentication for local deployment.
 
-## Deploy today
+## Microsoft Entra ID setup
+
+Follow Cloudflare's current [Microsoft Entra ID identity-provider guide](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/entra-id/). The Microsoft administrator must:
+
+1. In **Microsoft Entra admin center → Enterprise applications**, choose **New application → Create your own application**.
+2. Name it `Timekeeper Cloudflare Access` and choose **Register an application to integrate with Microsoft Entra ID**.
+3. Select a single-tenant account type for the Versatile Accounting tenant.
+4. Add a **Web** redirect URI:
+
+   ```text
+   https://YOUR-CLOUDFLARE-TEAM-NAME.cloudflareaccess.com/cdn-cgi/access/callback
+   ```
+
+5. Copy the **Application (client) ID** and **Directory (tenant) ID**.
+6. Under **Certificates & secrets**, create a client secret and immediately store its **Value** securely. Record its expiry date. Never place it in this repository or chat.
+7. Under **API permissions → Microsoft Graph → Delegated permissions**, add:
+
+   - `email`
+   - `offline_access`
+   - `openid`
+   - `profile`
+   - `User.Read`
+   - `Directory.Read.All`
+   - `GroupMember.Read.All`
+
+8. Grant tenant-wide administrator consent.
+9. Under **Token configuration**, add the `email` optional claim.
+
+Cloudflare documents this permission set as its tested and supported configuration. Group support is not required by the current Timekeeper policy, but keeping it available makes a future Entra admin group straightforward.
+
+## Cloudflare Access setup
+
+### 1. Add Microsoft Entra as the identity provider
+
+1. Open **Cloudflare Dashboard → Zero Trust → Integrations → Identity providers**.
+2. Choose **Add new identity provider → Azure AD**.
+3. Enter the Entra application client ID, tenant ID, and client-secret value directly in Cloudflare.
+4. Enable PKCE if offered.
+5. Set the email claim to `email` if it is not detected automatically.
+6. Under custom OIDC claims, add `oid`. This lets Timekeeper retain the stable Entra object ID if an email address changes.
+7. Save and use Cloudflare's **Test** action. Confirm the returned identity has the correct Versatile Accounting email and an `oid` field.
+
+### 2. Protect the Worker
+
+1. Open **Workers & Pages → timekeeper → Domains** and enable Cloudflare Access for `timekeeper.alexg-826.workers.dev`. The dashboard may direct you to the corresponding Zero Trust application.
+2. Create an **Allow** policy for emails ending in `@versatileaccounting.com.au`.
+3. Require the Microsoft Entra identity provider created above. Do not enable a bypass or One-time PIN fallback.
+4. Choose an Access session duration appropriate for the firm, such as 12 or 24 hours.
+5. Test with Alex first, then confirm another firm account can enter.
+
+The Worker independently rejects any authenticated email outside `versatileaccounting.com.au`.
+
+### 3. Record the Worker validation values
+
+- **Team domain:** **Zero Trust → Settings → Team name and domain**, formatted as `https://TEAM.cloudflareaccess.com`
+- **Application Audience (AUD) tag:** **Zero Trust → Access controls → Applications → Timekeeper → Configure → Additional settings**
+
+Set both as encrypted Worker secrets without putting their values on a command line:
+
+```powershell
+npx wrangler secret put ACCESS_TEAM_DOMAIN
+npx wrangler secret put ACCESS_AUD
+```
+
+Wrangler prompts for each value securely. The team domain and AUD are identifiers rather than passwords, but storing them as Worker secrets keeps environment-specific configuration out of Git.
+
+## Production deployment
 
 ### 1. Install and authenticate
-
-Install Node.js 22 or later, then run:
 
 ```powershell
 npm ci
 npx wrangler login
-```
-
-`wrangler login` opens Cloudflare authorization in the browser. Verify the active account with:
-
-```powershell
 npx wrangler whoami
 ```
 
-### 2. Create the D1 database
+### 2. Configure report-delivery secrets
+
+If not already present on the Worker, set these interactively:
 
 ```powershell
-npm run db:create
+npx wrangler secret put RESEND_API_KEY
+npx wrangler secret put EMAIL_FROM
+npx wrangler secret put WEEKLY_REPORT_RECIPIENT
+npx wrangler secret put REPORT_TEST_RECIPIENT
 ```
 
-The command prints a `database_id`. Replace the placeholder UUID in `wrangler.jsonc` under `d1_databases[0].database_id` with that value.
+- `EMAIL_FROM` must be a sender on the domain verified by Resend.
+- `WEEKLY_REPORT_RECIPIENT` is the production consolidated-report mailbox.
+- `REPORT_TEST_RECIPIENT` is a safe inbox used by the manual test action.
 
-Apply the production schema:
+### 3. Validate before the cutover
+
+```powershell
+npm run format
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+### 4. Apply the identity migration and deploy
+
+First enable Cloudflare Access and set `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`. Then run these commands together during the cutover:
 
 ```powershell
 npm run db:migrate
+npm run deploy
 ```
 
-Wrangler records each applied file from `migrations-d1` in D1's migration table. Production migration application is transactional and captures a database backup.
+Migration `0002_employee_identity.sql` creates employees, assigns entries to employees, replaces the company-wide active timer constraint with a per-employee constraint, and removes the obsolete password-session tables. The production database was confirmed empty before this migration, so no legacy entry assignment is required.
 
-### 3. Generate the requested shared-password hash
+Do not apply migration `0002` while the old shared-password Worker must remain operational: the old version expects the session tables that the migration removes.
 
-Do not put the plaintext password in the repository, a command argument, `.dev.vars`, or a Cloudflare variable. Generate the PBKDF2 hash locally without echoing the password:
+### 5. Verify the live workflow
+
+1. Open the Worker URL in a private browser window.
+2. Confirm Cloudflare redirects to Microsoft and rejects non-firm accounts.
+3. Sign in as an employee, choose or create a project, clock in, refresh, and clock out.
+4. Add, edit, and delete a manual entry.
+5. Confirm Today and This Week totals.
+6. Sign in as Alex or Brendon and open History; confirm the employee filter and all-firm records.
+7. Download a weekly workbook and inspect employee rows, Brisbane times, daily totals, employee totals, project totals, widths, and print layout in Excel.
+8. Send a test email, then repeat it and confirm no duplicate is sent.
+9. Inspect **Workers & Pages → timekeeper → Observability** and the `weekly_report_deliveries` records if a delivery fails.
+
+## Environment and bindings
+
+| Binding                    | Storage                      | Required       | Purpose                                              |
+| -------------------------- | ---------------------------- | -------------- | ---------------------------------------------------- |
+| `DB`                       | Wrangler D1 binding          | Yes            | Users, projects, entries, and delivery audit records |
+| `ASSETS`                   | Worker Static Assets binding | Yes            | React application                                    |
+| `ACCESS_TEAM_DOMAIN`       | Worker secret                | Production     | Access issuer and signing-key location               |
+| `ACCESS_AUD`               | Worker secret                | Production     | Expected Access application audience                 |
+| `ALLOWED_EMAIL_DOMAIN`     | Tracked Worker variable      | Yes            | Defense-in-depth company-domain restriction          |
+| `ADMIN_EMAILS`             | Tracked Worker variable      | Yes            | Comma-separated reporting administrators             |
+| `LOCAL_DEV_IDENTITY_EMAIL` | Local `.dev.vars` only       | Local optional | Localhost-only development identity                  |
+| `RESEND_API_KEY`           | Worker secret                | Email          | Sending-only Resend credential                       |
+| `EMAIL_FROM`               | Worker secret                | Email          | Verified report sender                               |
+| `WEEKLY_REPORT_RECIPIENT`  | Worker secret                | Email          | Scheduled consolidated-report recipient              |
+| `REPORT_TEST_RECIPIENT`    | Worker secret                | Email          | Manual test recipient                                |
+
+Alex and Brendon are configured as administrators in `wrangler.jsonc`. Changing administrators requires a reviewed configuration change and redeployment; it cannot be self-escalated from the UI.
+
+## Local development
+
+Copy `.dev.vars.example` to `.dev.vars`. Use non-production email settings and set `LOCAL_DEV_IDENTITY_EMAIL` to a test address ending in the allowed domain. This local identity is accepted only when the request hostname is `localhost` or `127.0.0.1`; it cannot bypass authentication on the deployed Worker.
 
 ```powershell
-$env:TIMEKEEPING_PASSWORD = Read-Host -MaskInput "Shared password"
-$passwordHash = npm run --silent password:hash
-Remove-Item Env:TIMEKEEPING_PASSWORD
+Copy-Item .dev.vars.example .dev.vars
+npm run db:migrate:local
+npm run dev
 ```
 
-Create a temporary, ignored secrets file from the tracked placeholder:
+Do not use the production Resend key or recipient during ordinary local work. `.dev.vars` is ignored by Git.
 
-```powershell
-Copy-Item .dev.vars.example .production.secrets
-```
-
-Put the generated hash after `APP_PASSWORD_HASH=` in `.production.secrets`, then clear the shell variable:
-
-```powershell
-Remove-Variable passwordHash
-```
-
-### 4. Configure the remaining secrets
-
-Fill the remaining blank values in `.production.secrets`.
-
-Use:
-
-- `EMAIL_FROM`: a sender on the domain verified by Resend, for example `Timekeeper <reports@your-domain.example>`
-- `WEEKLY_REPORT_RECIPIENT`: the required production report mailbox
-- `REPORT_TEST_RECIPIENT`: an inbox you can safely inspect during setup
-
-The file is excluded by `.gitignore`. Never commit it, attach it to an issue, or share it in screenshots. The repository and Wrangler configuration contain secret names only.
-
-### 5. Deploy
-
-```powershell
-npm run build:client
-npx wrangler deploy --secrets-file .production.secrets
-```
-
-Wrangler builds the React client, bundles the API Worker, uploads the static assets, attaches D1, and configures the Cron Trigger. It prints a `workers.dev` URL when deployment succeeds.
-
-After deployment, remove the temporary local secrets file:
-
-```powershell
-Remove-Item -LiteralPath .production.secrets
-```
-
-Cloudflare retains the encrypted secrets. Later `npm run deploy` calls preserve them. To rotate one value, run `npx wrangler secret put SECRET_NAME` and enter its new value at the prompt.
-
-Verify the backend:
-
-```powershell
-Invoke-RestMethod https://YOUR-WORKER.workers.dev/api/health
-```
-
-Expected response:
-
-```json
-{
-  "status": "ok",
-  "runtime": "cloudflare-workers",
-  "database": "d1",
-  "timezone": "Australia/Brisbane"
-}
-```
-
-### 6. Verify the complete workflow
-
-1. Open the `workers.dev` URL and enter the shared password.
-2. Enter or choose a project and clock in.
-3. Clock out.
-4. Edit the resulting entry.
-5. Confirm the Today and This Week totals.
-6. Open Reports and download the workbook.
-7. Open it in Microsoft Excel and inspect its rows, totals, widths, and print layout.
-8. Set `REPORT_TEST_RECIPIENT` to your inbox and click **Send test email**.
-9. Click it again and confirm the application reports that no duplicate was created.
-
-Test delivery uses `delivery_type=test`; the automated job uses `delivery_type=scheduled`. Sending a test can never consume the scheduled delivery record.
-
-### 7. Optional custom domain
-
-In Cloudflare Dashboard:
-
-1. Open **Workers & Pages**.
-2. Select **timekeeper**.
-3. Open **Settings → Domains & Routes**.
-4. Add a custom domain managed by the same Cloudflare account.
-
-No application configuration changes are needed after the domain is attached.
-
-## Weekly schedule
+## Weekly report and email schedule
 
 `wrangler.jsonc` defines:
 
@@ -169,70 +203,34 @@ No application configuration changes are needed after the domain is attached.
 5 14 * * SUN
 ```
 
-Cloudflare Cron uses UTC. Brisbane remains UTC+10 throughout the year, so Sunday 14:05 UTC is Monday 12:05 AM Brisbane time. The handler selects the Monday-to-Sunday week that has just ended.
+Cloudflare Cron uses UTC. Brisbane is UTC+10 year-round, so Sunday 14:05 UTC is Monday 12:05 AM in Brisbane. The scheduled handler selects the Monday-to-Sunday week that just ended and queries every employee's entries.
 
-Delivery safety has three layers:
+Duplicate protection has three layers:
 
-1. D1 allows only one record per week and delivery type.
-2. A sent record is never claimed again; a failed record may be retried.
-3. Resend receives a deterministic `Idempotency-Key` for each week and delivery type.
+1. D1 permits one delivery record per week and delivery type.
+2. A sent record is never claimed again; a failed record can be retried.
+3. Resend receives a deterministic idempotency key for the week and delivery type.
 
-Delivery status, attempt count, provider message ID, error message, recipient, and sent time are retained in D1. Worker observability is enabled for runtime and Cron logs.
-
-## Local development
-
-Copy `.dev.vars.example` to `.dev.vars` and use non-production values. `.dev.vars` is ignored by Git.
-
-Create the local D1 schema and start Wrangler:
-
-```powershell
-npm run db:migrate:local
-npm run dev
-```
-
-The first `npm run dev` builds the frontend and starts the Worker at the URL shown by Wrangler. Local D1 state is stored below the ignored `.wrangler` directory.
-
-Do not use the production Resend API key or production recipient for ordinary local testing.
-
-## Environment and secret bindings
-
-| Binding                   | Type                  | Required | Purpose                                                     |
-| ------------------------- | --------------------- | -------- | ----------------------------------------------------------- |
-| `DB`                      | D1 binding            | Yes      | Projects, entries, sessions, login attempts, and deliveries |
-| `ASSETS`                  | Static Assets binding | Yes      | Built React application                                     |
-| `APP_PASSWORD_HASH`       | Secret                | Yes      | PBKDF2 hash of the shared password                          |
-| `RESEND_API_KEY`          | Secret                | Yes      | Sending-only Resend credential                              |
-| `EMAIL_FROM`              | Secret                | Yes      | Verified report sender                                      |
-| `WEEKLY_REPORT_RECIPIENT` | Secret                | Yes      | Production weekly recipient                                 |
-| `REPORT_TEST_RECIPIENT`   | Secret                | Yes      | Safe manual-test recipient                                  |
+The test delivery type is independent of the scheduled type, so a manual test cannot consume the scheduled report record.
 
 ## D1 migrations
 
 ```powershell
-npm run db:migrate:local  # local Wrangler database
-npm run db:migrate        # production D1 database
+npm run db:migrate:local
+npm run db:migrate
 ```
 
-The initial migration creates:
-
-- case-insensitive reusable projects;
-- precise UTC millisecond timestamps;
-- a unique active-timer guard enforced by D1;
-- hashed session records;
-- persisted login-attempt windows;
-- idempotent weekly-delivery audit records.
-
-Times remain precise UTC timestamps in D1. Australia/Brisbane conversion occurs only for display, filtering, date allocation, and reports.
+Timestamps are precise UTC milliseconds in D1. Australia/Brisbane conversion occurs only for display, filters, date allocation, and reports. Decimal or formatted hours are derived summaries; start and end timestamps remain the source of truth.
 
 ## Backup and export
 
-D1 Time Travel provides point-in-time recovery. Also take periodic portable exports:
+Cloudflare D1 Time Travel supports point-in-time recovery. Also take periodic portable exports:
 
 ```powershell
 npx wrangler d1 export timekeeper --remote --output timekeeper-backup.sql
 ```
 
-Store exported files encrypted outside the repository. `*.sql` backup filenames should not be committed. Excel reports are useful business exports but are not a complete database backup.
+Store exports encrypted outside the repository. Excel reports are useful business records but are not a complete database backup.
 
 ## Quality checks
 
@@ -244,16 +242,4 @@ npm test
 npm run build
 ```
 
-The test suite runs inside Cloudflare's `workerd` runtime with real local D1 migrations. It covers:
-
-- authentication, protected routes, session recovery, CSRF, and logout;
-- persisted sign-in throttling;
-- clock-in/out and database-enforced active-timer exclusion;
-- manual add, edit, delete, and server validation;
-- Brisbane timezone and week boundaries;
-- durations, weekly/project totals, and cross-midnight allocation;
-- authenticated Excel creation and workbook parsing;
-- Resend request construction, failed-delivery retry, and duplicate prevention;
-- separation of test and scheduled delivery records.
-
-The production dry run is `npm run build`; it compiles the client and asks Wrangler to bundle and validate the Worker without deploying it.
+The tests run inside Cloudflare's `workerd` runtime with real local D1 migrations. They cover Access-protected routes, company-domain enforcement, automatic provisioning, CSRF, per-employee active timers, employee data isolation, admin reporting, duration and Brisbane boundaries, cross-midnight allocation, Excel contents, weekly totals, failed delivery retries, and duplicate-email prevention.
