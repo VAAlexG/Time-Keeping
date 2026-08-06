@@ -24,9 +24,14 @@
   "observability": {
     "enabled": true,
   },
+  "vars": {
+    "ALLOWED_EMAIL_DOMAIN": "versatileaccounting.com.au",
+    "ADMIN_EMAILS": "alexg@versatileaccounting.com.au,brendong@versatileaccounting.com.au",
+  },
   "secrets": {
     "required": [
-      "APP_PASSWORD_HASH",
+      "ACCESS_TEAM_DOMAIN",
+      "ACCESS_AUD",
       "RESEND_API_KEY",
       "EMAIL_FROM",
       "WEEKLY_REPORT_RECIPIENT",

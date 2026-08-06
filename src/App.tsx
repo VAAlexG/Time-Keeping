@@ -8,75 +8,29 @@ import {
   toBrisbaneLocalInput,
   todayBrisbane,
 } from './format';
-import type { DashboardData, Entry, HistoryData, Project } from './types';
+import type {
+  DashboardData,
+  Entry,
+  HistoryData,
+  Project,
+  SessionData,
+  SignedInUser,
+} from './types';
 
 type View = 'dashboard' | 'history' | 'reports';
-
-function Login({ onLogin }: { onLogin: (csrf: string) => void }) {
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setLoading(true);
-    setError('');
-    try {
-      const result = await api<{ csrfToken: string }>('/api/login', {
-        method: 'POST',
-        body: JSON.stringify({ password }),
-      });
-      setPassword('');
-      onLogin(result.csrfToken);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to sign in.');
-    } finally {
-      setLoading(false);
-    }
-  }
-  return (
-    <main className="login-shell">
-      <section className="login-card">
-        <div className="brand-mark" aria-hidden="true">
-          T
-        </div>
-        <p className="eyebrow">Private workspace</p>
-        <h1>Timekeeper</h1>
-        <p className="muted">Enter the shared password to access time records and reports.</p>
-        <form onSubmit={submit}>
-          <label htmlFor="password">Password</label>
-          <input
-            id="password"
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoFocus
-            required
-          />
-          {error && (
-            <div className="message error" role="alert">
-              {error}
-            </div>
-          )}
-          <button className="button primary full" disabled={loading}>
-            {loading ? 'Signing in…' : 'Sign in'}
-          </button>
-        </form>
-      </section>
-    </main>
-  );
-}
 
 function EntryRows({
   entries,
   now,
   onEdit,
   onDelete,
+  canEdit = () => true,
 }: {
   entries: Entry[];
   now: number;
   onEdit?: (entry: Entry) => void;
   onDelete?: (entry: Entry) => void;
+  canEdit?: (entry: Entry) => boolean;
 }) {
   if (!entries.length) return <div className="empty">No time entries here yet.</div>;
   return (
@@ -90,6 +44,7 @@ function EntryRows({
           <article className="entry-row" key={entry.id}>
             <div className="entry-main">
               <strong>{entry.projectName}</strong>
+              <span className="employee-name">{entry.userDisplayName}</span>
               <span className="time-range">
                 {formatTime(entry.startAt)} – {entry.endAt ? formatTime(entry.endAt) : 'Running'}
               </span>
@@ -97,7 +52,7 @@ function EntryRows({
             </div>
             <div className="entry-side">
               <strong>{formatDuration(elapsed)}</strong>
-              {entry.endAt && onEdit && onDelete && (
+              {entry.endAt && onEdit && onDelete && canEdit(entry) && (
                 <div className="row-actions">
                   <button className="link-button" onClick={() => onEdit(entry)}>
                     Edit
@@ -412,12 +367,16 @@ function Dashboard({
 
 function History({
   projects,
+  user,
+  users,
   csrf,
   refreshKey,
   editEntry,
   deleteEntry,
 }: {
   projects: Project[];
+  user: SignedInUser;
+  users: SignedInUser[];
   csrf: string;
   refreshKey: number;
   editEntry: (entry: Entry) => void;
@@ -429,6 +388,7 @@ function History({
   const [from, setFrom] = useState(localDate(initial.toISOString()));
   const [to, setTo] = useState(today);
   const [projectId, setProjectId] = useState('');
+  const [userId, setUserId] = useState('');
   const [data, setData] = useState<HistoryData | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -438,13 +398,17 @@ function History({
     try {
       const query = new URLSearchParams({ from, to });
       if (projectId) query.set('projectId', projectId);
+      if (user.role === 'admin') {
+        query.set('scope', 'all');
+        if (userId) query.set('userId', userId);
+      }
       setData(await api<HistoryData>(`/api/entries?${query}`));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to load history.');
     } finally {
       setLoading(false);
     }
-  }, [from, to, projectId]);
+  }, [from, to, projectId, user.role, userId]);
   useEffect(() => {
     void load();
   }, [load, csrf, refreshKey]);
@@ -485,6 +449,19 @@ function History({
             ))}
           </select>
         </label>
+        {user.role === 'admin' && (
+          <label>
+            Employee
+            <select value={userId} onChange={(event) => setUserId(event.target.value)}>
+              <option value="">All employees</option>
+              {users.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.displayName} ({item.email})
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
       {error && <div className="message error">{error}</div>}
       {loading ? (
@@ -514,6 +491,7 @@ function History({
               now={Date.now()}
               onEdit={editEntry}
               onDelete={deleteEntry}
+              canEdit={(entry) => entry.userId === user.id}
             />
           </div>
         ))
@@ -634,6 +612,9 @@ function Reports({ csrf }: { csrf: string }) {
 export default function App() {
   const [sessionLoading, setSessionLoading] = useState(true);
   const [csrf, setCsrf] = useState('');
+  const [user, setUser] = useState<SignedInUser | null>(null);
+  const [users, setUsers] = useState<SignedInUser[]>([]);
+  const [sessionError, setSessionError] = useState('');
   const [view, setView] = useState<View>('dashboard');
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -658,12 +639,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    api<{ authenticated: boolean; csrfToken?: string }>('/api/session')
+    api<SessionData>('/api/session')
       .then((result) => {
-        if (result.authenticated && result.csrfToken) setCsrf(result.csrfToken);
+        setCsrf(result.csrfToken);
+        setUser(result.user);
       })
+      .catch((caught) =>
+        setSessionError(
+          caught instanceof Error ? caught.message : 'Microsoft sign-in could not be verified.',
+        ),
+      )
       .finally(() => setSessionLoading(false));
   }, []);
+  useEffect(() => {
+    if (user?.role !== 'admin') return;
+    api<{ users: SignedInUser[] }>('/api/users')
+      .then((result) => setUsers(result.users))
+      .catch((caught) =>
+        setPageError(caught instanceof Error ? caught.message : 'Unable to load employees.'),
+      );
+  }, [user]);
   useEffect(() => {
     if (csrf) void refresh();
   }, [csrf, refresh]);
@@ -677,11 +672,6 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  async function logout() {
-    await api('/api/logout', { method: 'POST' }, csrf).catch(() => undefined);
-    setCsrf('');
-    setDashboard(null);
-  }
   function openNew() {
     setEditing(null);
     setDialogOpen(true);
@@ -728,7 +718,26 @@ export default function App() {
         <p>Loading Timekeeper…</p>
       </main>
     );
-  if (!csrf) return <Login onLogin={setCsrf} />;
+  if (!csrf || !user)
+    return (
+      <main className="login-shell">
+        <section className="login-card">
+          <div className="brand-mark" aria-hidden="true">
+            T
+          </div>
+          <p className="eyebrow">Private workspace</p>
+          <h1>Microsoft sign-in required</h1>
+          <p className="muted">
+            Timekeeper is available to Versatile Accounting Microsoft accounts through Cloudflare
+            Access.
+          </p>
+          {sessionError && <div className="message error">{sessionError}</div>}
+          <button className="button primary full" onClick={() => window.location.reload()}>
+            Sign in with Microsoft
+          </button>
+        </section>
+      </main>
+    );
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -740,7 +749,10 @@ export default function App() {
           </div>
         </div>
         <nav aria-label="Main navigation">
-          {(['dashboard', 'history', 'reports'] as View[]).map((item) => (
+          {(user.role === 'admin'
+            ? (['dashboard', 'history', 'reports'] as View[])
+            : (['dashboard', 'history'] as View[])
+          ).map((item) => (
             <button
               key={item}
               className={view === item ? 'selected' : ''}
@@ -751,12 +763,15 @@ export default function App() {
           ))}
         </nav>
         <div className="header-actions">
+          <span className="signed-in-user" title={user.email}>
+            {user.displayName}
+          </span>
           <button className="button secondary compact" onClick={openNew}>
             + Add time
           </button>
-          <button className="link-button" onClick={logout}>
+          <a className="link-button" href="/cdn-cgi/access/logout">
             Log out
-          </button>
+          </a>
         </div>
       </header>
       <main className="content">
@@ -786,6 +801,8 @@ export default function App() {
           ) : view === 'history' ? (
             <History
               projects={dashboard.projects}
+              user={user}
+              users={users}
               csrf={csrf}
               refreshKey={dataVersion}
               editEntry={openEdit}

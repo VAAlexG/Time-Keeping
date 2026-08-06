@@ -4,6 +4,9 @@ import type { TimeEntry } from '../server/types';
 
 const entry = (startAt: string, endAt: string): TimeEntry => ({
   id: '1',
+  userId: 'u1',
+  userEmail: 'alexg@versatileaccounting.com.au',
+  userDisplayName: 'Alex',
   projectId: 'p1',
   projectName: 'Accounting',
   notes: '',

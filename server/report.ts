@@ -15,6 +15,12 @@ export interface WeeklyReportResult {
   entryCount: number;
 }
 
+function employeeLabel(entry: { userDisplayName: string; userEmail: string }): string {
+  return entry.userDisplayName.toLowerCase() === entry.userEmail.toLowerCase()
+    ? entry.userEmail
+    : `${entry.userDisplayName} (${entry.userEmail})`;
+}
+
 function styleHeader(row: ExcelJS.Row): void {
   row.font = { bold: true, color: { argb: 'FFFFFFFF' } };
   row.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${BLUE}` } };
@@ -54,7 +60,7 @@ export async function buildWeeklyWorkbook(
     views: [{ state: 'frozen', ySplit: 4 }],
   });
 
-  sheet.mergeCells('A1:F1');
+  sheet.mergeCells('A1:G1');
   sheet.getCell('A1').value = 'Weekly Time Report';
   sheet.getCell('A1').font = { bold: true, size: 18, color: { argb: `FF${NAVY}` } };
   sheet.getCell('A2').value = 'Week';
@@ -64,6 +70,7 @@ export async function buildWeeklyWorkbook(
   sheet.addRow([]);
   const header = sheet.addRow([
     'Date',
+    'Employee',
     'Clock in',
     'Clock out',
     'Duration',
@@ -74,6 +81,7 @@ export async function buildWeeklyWorkbook(
 
   const dayTotals = new Map<string, number>();
   const projectTotals = new Map<string, number>();
+  const employeeTotals = new Map<string, number>();
   let totalMs = 0;
   let currentDate = '';
 
@@ -83,9 +91,10 @@ export async function buildWeeklyWorkbook(
         'Daily total',
         '',
         '',
+        '',
         dayTotals.get(currentDate)! / 86_400_000,
       ]);
-      totalRow.getCell(4).numFmt = '[h]"h "mm"m"';
+      totalRow.getCell(5).numFmt = '[h]"h "mm"m"';
       styleTotal(totalRow);
     }
     currentDate = segment.date;
@@ -100,6 +109,7 @@ export async function buildWeeklyWorkbook(
     const row = sheet.addRow([
       // Excel stores date serials without a timezone. UTC midnight preserves the Brisbane calendar date.
       DateTime.fromISO(segment.date, { zone: 'utc' }).toJSDate(),
+      employeeLabel(segment.entry),
       startMinutes / 1440,
       endMinutes / 1440,
       segment.durationMs / 86_400_000,
@@ -107,15 +117,17 @@ export async function buildWeeklyWorkbook(
       segment.entry.notes,
     ]);
     row.getCell(1).numFmt = 'ddd, dd mmm yyyy';
-    row.getCell(2).numFmt = 'h:mm AM/PM';
-    row.getCell(3).numFmt = isMidnightEnd ? '[h]:mm' : 'h:mm AM/PM';
-    row.getCell(4).numFmt = '[h]"h "mm"m"';
-    row.getCell(6).alignment = { wrapText: true, vertical: 'top' };
+    row.getCell(3).numFmt = 'h:mm AM/PM';
+    row.getCell(4).numFmt = isMidnightEnd ? '[h]:mm' : 'h:mm AM/PM';
+    row.getCell(5).numFmt = '[h]"h "mm"m"';
+    row.getCell(7).alignment = { wrapText: true, vertical: 'top' };
     dayTotals.set(segment.date, (dayTotals.get(segment.date) ?? 0) + segment.durationMs);
     projectTotals.set(
       segment.entry.projectName,
       (projectTotals.get(segment.entry.projectName) ?? 0) + segment.durationMs,
     );
+    const employee = employeeLabel(segment.entry);
+    employeeTotals.set(employee, (employeeTotals.get(employee) ?? 0) + segment.durationMs);
     totalMs += segment.durationMs;
   }
   if (currentDate) {
@@ -123,14 +135,15 @@ export async function buildWeeklyWorkbook(
       'Daily total',
       '',
       '',
+      '',
       dayTotals.get(currentDate)! / 86_400_000,
     ]);
-    totalRow.getCell(4).numFmt = '[h]"h "mm"m"';
+    totalRow.getCell(5).numFmt = '[h]"h "mm"m"';
     styleTotal(totalRow);
   }
   if (!segments.length) {
     const row = sheet.addRow(['No completed or running time was recorded for this week.']);
-    sheet.mergeCells(row.number, 1, row.number, 6);
+    sheet.mergeCells(row.number, 1, row.number, 7);
     row.font = { italic: true, color: { argb: 'FF66788A' } };
   }
 
@@ -149,15 +162,28 @@ export async function buildWeeklyWorkbook(
   grandTotal.getCell(2).numFmt = '[h]"h "mm"m"';
   styleTotal(grandTotal);
 
+  sheet.addRow([]);
+  const employeeTitle = sheet.addRow(['Employee summary']);
+  employeeTitle.font = { bold: true, size: 13, color: { argb: `FF${NAVY}` } };
+  const employeeHeader = sheet.addRow(['Employee', 'Total hours']);
+  styleHeader(employeeHeader);
+  for (const [employee, milliseconds] of [...employeeTotals.entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    const row = sheet.addRow([employee, milliseconds / 86_400_000]);
+    row.getCell(2).numFmt = '[h]"h "mm"m"';
+  }
+
   sheet.columns = [
     { width: 20 },
+    { width: 24 },
     { width: 13 },
     { width: 13 },
     { width: 14 },
     { width: 28 },
     { width: 52 },
   ];
-  sheet.autoFilter = { from: 'A4', to: 'F4' };
+  sheet.autoFilter = { from: 'A4', to: 'G4' };
   sheet.eachRow((row, rowNumber) => {
     if (rowNumber >= 4) {
       row.eachCell((cell) => {

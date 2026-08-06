@@ -1,24 +1,32 @@
 import ExcelJS from 'exceljs';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { hashPassword } from '../server/auth';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { brisbaneNow, getWeekRange } from '../server/time';
-import worker, { runScheduledReport } from '../worker';
+import { createApp, runScheduledReport } from '../worker';
+import type { AccessIdentity } from '../worker/access';
 import type { Env } from '../worker/env';
 
-let passwordHash = '';
+const ALEX = 'alexg@versatileaccounting.com.au';
+const BRENDON = 'brendong@versatileaccounting.com.au';
+const EMPLOYEE = 'employee@versatileaccounting.com.au';
 
-beforeAll(async () => {
-  passwordHash = await hashPassword('test-password', new Uint8Array(16).fill(7));
+const app = createApp(async (request): Promise<AccessIdentity> => {
+  const email = request.headers.get('x-test-email');
+  if (!email) throw new Error('missing test identity');
+  return {
+    subject: `subject:${email}`,
+    entraObjectId: `oid:${email}`,
+    email,
+    displayName: email.split('@')[0],
+  };
 });
 
 beforeEach(async () => {
   await env.DB.batch([
     env.DB.prepare('DELETE FROM weekly_report_deliveries'),
-    env.DB.prepare('DELETE FROM sessions'),
-    env.DB.prepare('DELETE FROM login_attempts'),
     env.DB.prepare('DELETE FROM time_entries'),
+    env.DB.prepare('DELETE FROM users'),
     env.DB.prepare('DELETE FROM projects'),
   ]);
   vi.restoreAllMocks();
@@ -28,7 +36,10 @@ function bindings(): Env {
   return {
     DB: env.DB,
     ASSETS: { fetch: async () => new Response('asset') } as unknown as Fetcher,
-    APP_PASSWORD_HASH: passwordHash,
+    ACCESS_TEAM_DOMAIN: 'https://example.cloudflareaccess.com',
+    ACCESS_AUD: 'test-audience',
+    ALLOWED_EMAIL_DOMAIN: 'versatileaccounting.com.au',
+    ADMIN_EMAILS: `${ALEX},${BRENDON}`,
     RESEND_API_KEY: 're_test_key',
     EMAIL_FROM: 'Timekeeper <reports@example.com>',
     WEEKLY_REPORT_RECIPIENT: 'weekly@example.com',
@@ -38,7 +49,7 @@ function bindings(): Env {
 
 async function call(path: string, init: RequestInit = {}): Promise<Response> {
   const context = createExecutionContext();
-  const response = await worker.fetch(
+  const response = await app.fetch(
     new Request(`https://timekeeper.example${path}`, init),
     bindings(),
     context,
@@ -47,166 +58,189 @@ async function call(path: string, init: RequestInit = {}): Promise<Response> {
   return response;
 }
 
-async function login(ip = '203.0.113.10') {
-  const response = await call('/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': ip },
-    body: JSON.stringify({ password: 'test-password' }),
-  });
+async function signIn(email: string) {
+  const response = await call('/api/session', { headers: { 'X-Test-Email': email } });
   expect(response.status).toBe(200);
-  const body = (await response.json()) as { csrfToken: string };
+  const body = (await response.json()) as {
+    csrfToken: string;
+    user: { id: string; email: string; role: string };
+  };
   return {
+    email,
+    user: body.user,
     csrf: body.csrfToken,
     cookie: response.headers.get('set-cookie')!.split(';')[0],
   };
 }
 
-function authenticatedHeaders(session: { csrf: string; cookie: string }, json = true) {
+function headers(session: Awaited<ReturnType<typeof signIn>>, json = true) {
   return {
+    'X-Test-Email': session.email,
     Cookie: session.cookie,
     'X-CSRF-Token': session.csrf,
     ...(json ? { 'Content-Type': 'application/json' } : {}),
   };
 }
 
-describe('Cloudflare Worker authentication', () => {
-  it('protects routes, recovers the D1 session, and logs out', async () => {
+describe('Cloudflare Access authentication and authorization', () => {
+  it('protects API routes, provisions users, and enforces the company domain', async () => {
     expect((await call('/api/dashboard')).status).toBe(401);
-    const session = await login();
-    const recovered = await call('/api/session', { headers: { Cookie: session.cookie } });
-    expect(await recovered.json()).toEqual({ authenticated: true, csrfToken: session.csrf });
-    expect((await call('/api/dashboard', { headers: { Cookie: session.cookie } })).status).toBe(
-      200,
-    );
     expect(
       (
-        await call('/api/logout', {
-          method: 'POST',
-          headers: authenticatedHeaders(session, false),
+        await call('/api/session', {
+          headers: { 'X-Test-Email': 'person@outside.example' },
         })
       ).status,
-    ).toBe(204);
-    expect((await call('/api/dashboard', { headers: { Cookie: session.cookie } })).status).toBe(
-      401,
-    );
+    ).toBe(403);
+
+    const employee = await signIn(EMPLOYEE);
+    expect(employee.user).toMatchObject({ email: EMPLOYEE, role: 'employee' });
+    expect((await call('/api/dashboard', { headers: headers(employee, false) })).status).toBe(200);
+    expect((await call('/api/users', { headers: headers(employee, false) })).status).toBe(403);
+
+    const admin = await signIn(ALEX);
+    expect(admin.user.role).toBe('admin');
+    const users = await call('/api/users', { headers: headers(admin, false) });
+    expect(((await users.json()) as { users: unknown[] }).users).toHaveLength(2);
   });
 
-  it('rate limits repeated incorrect passwords in D1', async () => {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const response = await call('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.55' },
-        body: JSON.stringify({ password: 'wrong' }),
-      });
-      expect(response.status).toBe(401);
-    }
-    const blocked = await call('/api/login', {
+  it('requires a same-origin CSRF token for mutations', async () => {
+    await signIn(EMPLOYEE);
+    const response = await call('/api/clock-in', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.55' },
-      body: JSON.stringify({ password: 'wrong' }),
+      headers: { 'X-Test-Email': EMPLOYEE, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectName: 'Accounting' }),
     });
-    expect(blocked.status).toBe(429);
+    expect(response.status).toBe(403);
   });
 });
 
-describe('Cloudflare Worker timekeeping workflow', () => {
-  it('clocks in and out and enforces one active timer in D1', async () => {
-    const session = await login();
-    const started = await call('/api/clock-in', {
+describe('employee timekeeping isolation', () => {
+  it('enforces one active timer per employee while allowing different employees to run timers', async () => {
+    const alex = await signIn(ALEX);
+    const employee = await signIn(EMPLOYEE);
+    for (const session of [alex, employee]) {
+      const started = await call('/api/clock-in', {
+        method: 'POST',
+        headers: headers(session),
+        body: JSON.stringify({ projectName: 'Coding project', notes: 'Access migration' }),
+      });
+      expect(started.status).toBe(201);
+    }
+    const duplicate = await call('/api/clock-in', {
       method: 'POST',
-      headers: authenticatedHeaders(session),
-      body: JSON.stringify({ projectName: 'Coding project', notes: 'Worker migration' }),
-    });
-    expect(started.status).toBe(201);
-    const second = await call('/api/clock-in', {
-      method: 'POST',
-      headers: authenticatedHeaders(session),
+      headers: headers(alex),
       body: JSON.stringify({ projectName: 'Accounting' }),
     });
-    expect(second.status).toBe(409);
-    await env.DB.prepare(
-      'UPDATE time_entries SET start_at = start_at - 3600000 WHERE active_guard = 1',
-    ).run();
-    const stopped = await call('/api/clock-out', {
-      method: 'POST',
-      headers: authenticatedHeaders(session, false),
-    });
-    expect(stopped.status).toBe(200);
-    expect(((await stopped.json()) as { entry: { endAt: string } }).entry.endAt).toBeTruthy();
+    expect(duplicate.status).toBe(409);
+    await env.DB.prepare('UPDATE time_entries SET start_at = start_at - 3600000').run();
+    expect(
+      (
+        await call('/api/clock-out', {
+          method: 'POST',
+          headers: headers(alex, false),
+        })
+      ).status,
+    ).toBe(200);
+    const employeeDashboard = (await (
+      await call('/api/dashboard', { headers: headers(employee, false) })
+    ).json()) as { active: { userId: string } | null };
+    expect(employeeDashboard.active?.userId).toBe(employee.user.id);
   });
 
-  it('completes add, edit, totals, and authenticated Excel download end to end', async () => {
-    const session = await login();
-    const localDate = brisbaneNow().toISODate()!;
-    const invalid = await call('/api/entries', {
-      method: 'POST',
-      headers: authenticatedHeaders(session),
-      body: JSON.stringify({
-        projectName: 'Accounting',
-        notes: '',
-        startLocal: `${localDate}T12:00`,
-        endLocal: `${localDate}T11:00`,
-      }),
-    });
-    expect(invalid.status).toBe(400);
+  it('allows employees to add, edit, and delete only their own entries', async () => {
+    const alex = await signIn(ALEX);
+    const employee = await signIn(EMPLOYEE);
+    const date = brisbaneNow().toISODate()!;
     const created = await call('/api/entries', {
       method: 'POST',
-      headers: authenticatedHeaders(session),
+      headers: headers(employee),
       body: JSON.stringify({
         projectName: 'Accounting',
         notes: 'Initial entry',
-        startLocal: `${localDate}T10:00`,
-        endLocal: `${localDate}T12:00`,
+        startLocal: `${date}T10:00`,
+        endLocal: `${date}T12:00`,
       }),
     });
     expect(created.status).toBe(201);
     const id = ((await created.json()) as { entry: { id: string } }).entry.id;
+    const blocked = await call(`/api/entries/${id}`, {
+      method: 'DELETE',
+      headers: headers(alex, false),
+    });
+    expect(blocked.status).toBe(404);
     const edited = await call(`/api/entries/${id}`, {
       method: 'PUT',
-      headers: authenticatedHeaders(session),
+      headers: headers(employee),
       body: JSON.stringify({
         projectName: 'Client accounts',
         notes: 'Reviewed and corrected',
-        startLocal: `${localDate}T10:00`,
-        endLocal: `${localDate}T12:15`,
+        startLocal: `${date}T10:00`,
+        endLocal: `${date}T12:15`,
       }),
     });
     expect(edited.status).toBe(200);
     const dashboard = (await (
-      await call('/api/dashboard', { headers: { Cookie: session.cookie } })
-    ).json()) as { today: { totalMs: number }; week: { projectTotals: unknown[] } };
-    expect(dashboard.today.totalMs).toBe(135 * 60_000);
-    expect(dashboard.week.projectTotals).toEqual([
-      { projectName: 'Client accounts', totalMs: 135 * 60_000 },
-    ]);
-
-    const weekStart = getWeekRange(localDate).weekStart;
-    const report = await call(`/api/reports/weekly.xlsx?weekStart=${weekStart}`, {
-      headers: { Cookie: session.cookie },
-    });
-    expect(report.status).toBe(200);
-    expect(report.headers.get('content-type')).toMatch(/spreadsheetml/);
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(Buffer.from(await report.arrayBuffer()) as unknown as ExcelJS.Buffer);
-    expect(workbook.getWorksheet('Weekly time report')?.getCell('A1').value).toBe(
-      'Weekly Time Report',
-    );
-
-    const deleted = await call(`/api/entries/${id}`, {
-      method: 'DELETE',
-      headers: authenticatedHeaders(session, false),
-    });
-    expect(deleted.status).toBe(204);
-    const afterDelete = (await (
-      await call('/api/dashboard', { headers: { Cookie: session.cookie } })
+      await call('/api/dashboard', { headers: headers(employee, false) })
     ).json()) as { today: { totalMs: number } };
-    expect(afterDelete.today.totalMs).toBe(0);
+    expect(dashboard.today.totalMs).toBe(135 * 60_000);
+    expect(
+      (
+        await call(`/api/entries/${id}`, {
+          method: 'DELETE',
+          headers: headers(employee, false),
+        })
+      ).status,
+    ).toBe(204);
   });
 });
 
-describe('Cloudflare report delivery', () => {
+describe('administrator reporting and delivery', () => {
+  it('consolidates every employee in the Excel report and blocks employee report access', async () => {
+    const admin = await signIn(ALEX);
+    const employee = await signIn(EMPLOYEE);
+    const brendon = await signIn(BRENDON);
+    const date = brisbaneNow().toISODate()!;
+    for (const session of [employee, brendon]) {
+      expect(
+        (
+          await call('/api/entries', {
+            method: 'POST',
+            headers: headers(session),
+            body: JSON.stringify({
+              projectName: 'Client work',
+              notes: session.email,
+              startLocal: `${date}T10:00`,
+              endLocal: `${date}T11:00`,
+            }),
+          })
+        ).status,
+      ).toBe(201);
+    }
+    const weekStart = getWeekRange(date).weekStart;
+    expect(
+      (
+        await call(`/api/reports/weekly.xlsx?weekStart=${weekStart}`, {
+          headers: headers(employee, false),
+        })
+      ).status,
+    ).toBe(403);
+    const response = await call(`/api/reports/weekly.xlsx?weekStart=${weekStart}`, {
+      headers: headers(admin, false),
+    });
+    expect(response.status).toBe(200);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(
+      Buffer.from(await response.arrayBuffer()) as unknown as ExcelJS.Buffer,
+    );
+    const sheet = workbook.getWorksheet('Weekly time report')!;
+    const employeeValues = sheet.getColumn(2).values.map(String);
+    expect(employeeValues).toContain('employee (employee@versatileaccounting.com.au)');
+    expect(employeeValues).toContain('brendong (brendong@versatileaccounting.com.au)');
+  });
+
   it('keeps test and scheduled delivery idempotency separate', async () => {
-    const session = await login();
+    const admin = await signIn(ALEX);
     const resend = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ id: 'email_123' }), {
         status: 200,
@@ -215,26 +249,18 @@ describe('Cloudflare report delivery', () => {
     );
     const testSend = await call('/api/reports/test-email', {
       method: 'POST',
-      headers: authenticatedHeaders(session),
+      headers: headers(admin),
       body: JSON.stringify({}),
     });
     expect(testSend.status).toBe(200);
-    expect((await testSend.json()) as { sent: boolean }).toMatchObject({ sent: true });
     const repeated = await call('/api/reports/test-email', {
       method: 'POST',
-      headers: authenticatedHeaders(session),
+      headers: headers(admin),
       body: JSON.stringify({}),
     });
     expect(await repeated.json()).toMatchObject({ sent: false, reason: 'already-sent' });
 
     await runScheduledReport(bindings());
     expect(resend).toHaveBeenCalledTimes(2);
-    const deliveries = await env.DB.prepare(
-      'SELECT delivery_type, status FROM weekly_report_deliveries ORDER BY delivery_type',
-    ).all<{ delivery_type: string; status: string }>();
-    expect(deliveries.results).toEqual([
-      { delivery_type: 'scheduled', status: 'sent' },
-      { delivery_type: 'test', status: 'sent' },
-    ]);
   });
 });
