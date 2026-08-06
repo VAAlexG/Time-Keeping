@@ -562,6 +562,10 @@ nav button.selected {
 .report-controls label {
   width: min(330px, 100%);
 }
+.report-buttons {
+  display: flex;
+  gap: 10px;
+}
 .report-details {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -709,6 +713,9 @@ nav button.selected {
   }
   .report-controls {
     align-items: stretch;
+    flex-direction: column;
+  }
+  .report-buttons {
     flex-direction: column;
   }
 }

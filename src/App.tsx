@@ -540,9 +540,10 @@ function History({
   );
 }
 
-function Reports() {
+function Reports({ csrf }: { csrf: string }) {
   const [week, setWeek] = useState(todayBrisbane());
   const [downloading, setDownloading] = useState(false);
+  const [sending, setSending] = useState(false);
   const [message, setMessage] = useState('');
   async function download() {
     setDownloading(true);
@@ -554,6 +555,28 @@ function Reports() {
       setMessage(caught instanceof Error ? caught.message : 'Unable to download the report.');
     } finally {
       setDownloading(false);
+    }
+  }
+  async function sendTestEmail() {
+    setSending(true);
+    setMessage('');
+    try {
+      const result = await api<{ sent: boolean; reason?: string }>(
+        '/api/reports/test-email',
+        { method: 'POST', body: JSON.stringify({ weekStart: week }) },
+        csrf,
+      );
+      setMessage(
+        result.sent
+          ? 'Test report emailed successfully.'
+          : result.reason === 'already-sent'
+            ? 'This week’s test report was already sent; no duplicate was created.'
+            : 'A test delivery is already in progress.',
+      );
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : 'Unable to send the test report.');
+    } finally {
+      setSending(false);
     }
   }
   return (
@@ -574,12 +597,19 @@ function Reports() {
           Choose any date in the week
           <input type="date" value={week} onChange={(event) => setWeek(event.target.value)} />
         </label>
-        <button className="button primary" onClick={download} disabled={downloading}>
-          {downloading ? 'Preparing workbook…' : 'Download .xlsx'}
-        </button>
+        <div className="report-buttons">
+          <button className="button secondary" onClick={sendTestEmail} disabled={sending}>
+            {sending ? 'Sending test…' : 'Send test email'}
+          </button>
+          <button className="button primary" onClick={download} disabled={downloading}>
+            {downloading ? 'Preparing workbook…' : 'Download .xlsx'}
+          </button>
+        </div>
       </div>
       {message && (
-        <div className={`message ${message.includes('success') ? 'success' : 'error'}`}>
+        <div
+          className={`message ${message.toLowerCase().includes('unable') ? 'error' : 'success'}`}
+        >
           {message}
         </div>
       )}
@@ -762,7 +792,7 @@ export default function App() {
               deleteEntry={deleteEntry}
             />
           ) : (
-            <Reports />
+            <Reports csrf={csrf} />
           ))
         )}
       </main>

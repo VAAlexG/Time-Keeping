@@ -1,10 +1,16 @@
 node_modules/
 dist/
 dist-server/
+.wrangler/
+.wrangler-dist/
+worker-configuration.d.ts
+.dev.vars
+*.secrets
 coverage/
 .env
 .env.*
 !.env.example
 *.log
 *.xlsx
+*-backup.sql
 .DS_Store

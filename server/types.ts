@@ -41,6 +41,11 @@ export interface TimeStore {
   deleteEntry(id: string): Promise<boolean>;
   listEntries(input: { from: Date; to: Date; projectId?: string }): Promise<TimeEntry[]>;
   claimDelivery(weekStart: string, type: DeliveryType, recipient: string): Promise<DeliveryClaim>;
-  markDeliverySent(weekStart: string, type: DeliveryType, sentAt: Date): Promise<void>;
+  markDeliverySent(
+    weekStart: string,
+    type: DeliveryType,
+    sentAt: Date,
+    providerMessageId?: string,
+  ): Promise<void>;
   markDeliveryFailed(weekStart: string, type: DeliveryType, error: string): Promise<void>;
 }

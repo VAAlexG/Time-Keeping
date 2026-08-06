@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "timekeeper",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"],
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "timekeeper",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations-d1",
+    },
+  ],
+  "triggers": {
+    "crons": ["5 14 * * 0"],
+  },
+  "observability": {
+    "enabled": true,
+  },
+  "secrets": {
+    "required": [
+      "APP_PASSWORD_HASH",
+      "RESEND_API_KEY",
+      "EMAIL_FROM",
+      "WEEKLY_REPORT_RECIPIENT",
+      "REPORT_TEST_RECIPIENT",
+    ],
+  },
+}
