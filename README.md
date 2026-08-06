@@ -25,7 +25,7 @@ A private, shared-password timekeeping application built for Cloudflare Workers.
 - **Authentication:** PBKDF2 password hash stored as a Worker secret; random server-side sessions stored hashed in D1
 - **Reports:** ExcelJS, bundled and executed in the Worker runtime
 - **Email:** Resend HTTPS API with Excel attachment
-- **Schedule:** Cloudflare Cron Trigger at `5 14 * * 0` UTC
+- **Schedule:** Cloudflare Cron Trigger at `5 14 * * SUN` UTC
 
 The Worker dry-run bundle is well under Cloudflare's compressed Worker-size limit. Because password verification and Excel generation are CPU-heavy compared with an ordinary request, the Workers Paid plan is recommended for predictable production operation.
 
@@ -166,7 +166,7 @@ No application configuration changes are needed after the domain is attached.
 `wrangler.jsonc` defines:
 
 ```text
-5 14 * * 0
+5 14 * * SUN
 ```
 
 Cloudflare Cron uses UTC. Brisbane remains UTC+10 throughout the year, so Sunday 14:05 UTC is Monday 12:05 AM Brisbane time. The handler selects the Monday-to-Sunday week that has just ended.

@@ -14,12 +14,12 @@
     {
       "binding": "DB",
       "database_name": "timekeeper",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "e4818748-ec9a-4008-b935-872677c0f4ac",
       "migrations_dir": "migrations-d1",
     },
   ],
   "triggers": {
-    "crons": ["5 14 * * 0"],
+    "crons": ["5 14 * * SUN"],
   },
   "observability": {
     "enabled": true,
