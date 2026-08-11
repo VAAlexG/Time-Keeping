@@ -10,6 +10,14 @@ import type { Env } from '../worker/env';
 const ALEX = 'alexg@versatileaccounting.com.au';
 const BRENDON = 'brendong@versatileaccounting.com.au';
 const EMPLOYEE = 'employee@versatileaccounting.com.au';
+const CLIENT_ID = '10000000-0000-4000-8000-000000000001';
+const JOB_ID = '20000000-0000-4000-8000-000000000001';
+const CLIENT_WORK = {
+  workType: 'client',
+  clientId: CLIENT_ID,
+  jobId: JOB_ID,
+  billable: true,
+} as const;
 
 const app = createApp(async (request): Promise<AccessIdentity> => {
   const email = request.headers.get('x-test-email');
@@ -26,8 +34,22 @@ beforeEach(async () => {
   await env.DB.batch([
     env.DB.prepare('DELETE FROM weekly_report_deliveries'),
     env.DB.prepare('DELETE FROM time_entries'),
+    env.DB.prepare('DELETE FROM jobs'),
+    env.DB.prepare('DELETE FROM clients'),
+    env.DB.prepare('DELETE FROM sync_runs'),
     env.DB.prepare('DELETE FROM users'),
     env.DB.prepare('DELETE FROM projects'),
+  ]);
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO clients (id, external_id, source, name, active, created_at, updated_at, synced_at)
+      VALUES (?, 'fyi-client-1', 'fyi', 'Northbridge Joinery', 1, ?, ?, ?)`,
+    ).bind(CLIENT_ID, now, now, now),
+    env.DB.prepare(
+      `INSERT INTO jobs (id, external_id, client_id, source, name, active, default_billable, created_at, updated_at, synced_at)
+      VALUES (?, 'fyi-job-1', ?, 'fyi', 'Annual accounts', 1, 1, ?, ?, ?)`,
+    ).bind(JOB_ID, CLIENT_ID, now, now, now),
   ]);
   vi.restoreAllMocks();
 });
@@ -44,6 +66,7 @@ function bindings(): Env {
     EMAIL_FROM: 'Timekeeper <reports@example.com>',
     WEEKLY_REPORT_RECIPIENT: 'weekly@example.com',
     REPORT_TEST_RECIPIENT: 'test@example.com',
+    FYI_API_BASE_URL: 'https://api-ap-southeast-2.fyi.app/external',
   };
 }
 
@@ -109,13 +132,49 @@ describe('Cloudflare Access authentication and authorization', () => {
     const response = await call('/api/clock-in', {
       method: 'POST',
       headers: { 'X-Test-Email': EMPLOYEE, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectName: 'Accounting' }),
+      body: JSON.stringify(CLIENT_WORK),
     });
     expect(response.status).toBe(403);
   });
 });
 
 describe('employee timekeeping isolation', () => {
+  it('records internal work as non-billable and rejects mismatched client jobs', async () => {
+    const employee = await signIn(EMPLOYEE);
+    const date = brisbaneNow().toISODate()!;
+    const internal = await call('/api/entries', {
+      method: 'POST',
+      headers: headers(employee),
+      body: JSON.stringify({
+        workType: 'internal',
+        internalActivityId: '00000000-0000-4000-8000-000000000002',
+        billable: false,
+        notes: 'Training session',
+        startLocal: `${date}T09:00`,
+        endLocal: `${date}T10:00`,
+      }),
+    });
+    expect(internal.status).toBe(201);
+    expect((await internal.json()) as { entry: unknown }).toMatchObject({
+      entry: { workType: 'internal', activityName: 'Training', billable: false },
+    });
+    const invalid = await call('/api/entries', {
+      method: 'POST',
+      headers: headers(employee),
+      body: JSON.stringify({
+        ...CLIENT_WORK,
+        clientId: '30000000-0000-4000-8000-000000000001',
+        notes: '',
+        startLocal: `${date}T10:00`,
+        endLocal: `${date}T11:00`,
+      }),
+    });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({
+      error: 'Choose a job belonging to the selected client.',
+    });
+  });
+
   it('enforces one active timer per employee while allowing different employees to run timers', async () => {
     const alex = await signIn(ALEX);
     const employee = await signIn(EMPLOYEE);
@@ -123,14 +182,14 @@ describe('employee timekeeping isolation', () => {
       const started = await call('/api/clock-in', {
         method: 'POST',
         headers: headers(session),
-        body: JSON.stringify({ projectName: 'Coding project', notes: 'Access migration' }),
+        body: JSON.stringify({ ...CLIENT_WORK, notes: 'Access migration' }),
       });
       expect(started.status).toBe(201);
     }
     const duplicate = await call('/api/clock-in', {
       method: 'POST',
       headers: headers(alex),
-      body: JSON.stringify({ projectName: 'Accounting' }),
+      body: JSON.stringify(CLIENT_WORK),
     });
     expect(duplicate.status).toBe(409);
     await env.DB.prepare('UPDATE time_entries SET start_at = start_at - 3600000').run();
@@ -156,7 +215,7 @@ describe('employee timekeeping isolation', () => {
       method: 'POST',
       headers: headers(employee),
       body: JSON.stringify({
-        projectName: 'Accounting',
+        ...CLIENT_WORK,
         notes: 'Initial entry',
         startLocal: `${date}T10:00`,
         endLocal: `${date}T12:00`,
@@ -173,7 +232,7 @@ describe('employee timekeeping isolation', () => {
       method: 'PUT',
       headers: headers(employee),
       body: JSON.stringify({
-        projectName: 'Client accounts',
+        ...CLIENT_WORK,
         notes: 'Reviewed and corrected',
         startLocal: `${date}T10:00`,
         endLocal: `${date}T12:15`,
@@ -208,7 +267,7 @@ describe('administrator reporting and delivery', () => {
             method: 'POST',
             headers: headers(session),
             body: JSON.stringify({
-              projectName: 'Client work',
+              ...CLIENT_WORK,
               notes: session.email,
               startLocal: `${date}T10:00`,
               endLocal: `${date}T11:00`,

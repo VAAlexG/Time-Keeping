@@ -41,12 +41,14 @@ describe('weekly Excel report', () => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(report.buffer as unknown as ExcelJS.Buffer);
     const sheet = workbook.getWorksheet('Weekly time report')!;
-    expect(sheet.getCell('A1').value).toBe('Weekly Time Report');
-    expect(sheet.getColumn(7).width).toBe(52);
+    expect(sheet.getCell('A1').value).toBe('VERSATILE ACCOUNTING - WEEKLY TIME REPORT');
+    expect(sheet.getCell('A1').fill).toMatchObject({ fgColor: { argb: '121212' } });
+    expect(sheet.getColumn(13).width).toBe(48);
     expect((sheet.getCell('A5').value as Date).toISOString()).toBe('2026-08-04T00:00:00.000Z');
     const values = sheet.getColumn(1).values.map(String);
     expect(values).toContain('Daily total');
     expect(values).toContain('Entire week');
+    expect(sheet.getRow(4).values).toContain('External IDs');
     expect(sheet.getColumn(2).values.map(String)).toContain(
       'Alex (alexg@versatileaccounting.com.au)',
     );

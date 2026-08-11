@@ -10,4 +10,10 @@ export interface Env {
   EMAIL_FROM: string;
   WEEKLY_REPORT_RECIPIENT: string;
   REPORT_TEST_RECIPIENT: string;
+  FYI_API_BASE_URL: string;
+  FYI_ACCESS_ID?: string;
+  FYI_ACCESS_SECRET?: string;
+  FYI_APPLICATION_ID?: string;
+  RUNNING_TIMER_ALERT_HOURS?: string;
+  LONG_ENTRY_ALERT_HOURS?: string;
 }

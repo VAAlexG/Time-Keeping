@@ -7,6 +7,7 @@ import type {
   TimeStore,
   User,
   UserRole,
+  WorkClassificationInput,
 } from '../server/types';
 
 export class MemoryTimeStore implements TimeStore {
@@ -78,9 +79,20 @@ export class MemoryTimeStore implements TimeStore {
     return this.entries.find((entry) => entry.userId === userId && !entry.endAt) ?? null;
   }
 
-  async clockIn(userId: string, projectName: string, notes: string, now: Date): Promise<TimeEntry> {
+  async clockIn(
+    userId: string,
+    projectName: string | WorkClassificationInput,
+    notes: string,
+    now: Date,
+  ): Promise<TimeEntry> {
     if (await this.getActiveEntry(userId)) throw new Error('ACTIVE_TIMER_EXISTS');
-    const project = await this.getOrCreateProject(projectName);
+    const project = await this.getOrCreateProject(
+      typeof projectName === 'string'
+        ? projectName
+        : projectName.workType === 'client'
+          ? 'Client work'
+          : 'Internal work',
+    );
     const entry = this.makeEntry(userId, project, notes, now, null);
     this.entries.push(entry);
     return entry;
@@ -96,9 +108,19 @@ export class MemoryTimeStore implements TimeStore {
 
   async createEntry(
     userId: string,
-    input: { projectName: string; notes: string; startAt: Date; endAt: Date },
+    input: ({ projectName: string } | WorkClassificationInput) & {
+      notes: string;
+      startAt: Date;
+      endAt: Date;
+    },
   ): Promise<TimeEntry> {
-    const project = await this.getOrCreateProject(input.projectName);
+    const project = await this.getOrCreateProject(
+      'projectName' in input
+        ? input.projectName
+        : input.workType === 'client'
+          ? 'Client work'
+          : 'Internal work',
+    );
     const entry = this.makeEntry(userId, project, input.notes, input.startAt, input.endAt);
     this.entries.push(entry);
     return entry;
@@ -107,16 +129,39 @@ export class MemoryTimeStore implements TimeStore {
   async updateEntry(
     userId: string,
     id: string,
-    input: { projectName: string; notes: string; startAt: Date; endAt: Date },
+    input: ({ projectName: string } | WorkClassificationInput) & {
+      notes: string;
+      startAt: Date;
+      endAt: Date;
+    },
   ): Promise<TimeEntry | null> {
     const entry = this.entries.find(
       (candidate) => candidate.id === id && candidate.userId === userId && candidate.endAt,
     );
     if (!entry) return null;
-    const project = await this.getOrCreateProject(input.projectName);
+    const project = await this.getOrCreateProject(
+      'projectName' in input
+        ? input.projectName
+        : input.workType === 'client'
+          ? 'Client work'
+          : 'Internal work',
+    );
     Object.assign(entry, {
       projectId: project.id,
       projectName: project.name,
+      workType: 'legacy',
+      clientId: null,
+      clientName: null,
+      clientExternalId: null,
+      clientCode: null,
+      jobId: null,
+      jobName: null,
+      jobExternalId: null,
+      jobCode: null,
+      internalActivityId: null,
+      activityName: null,
+      billable: false,
+      legacy: true,
       notes: input.notes,
       startAt: input.startAt.toISOString(),
       endAt: input.endAt.toISOString(),
@@ -183,6 +228,19 @@ export class MemoryTimeStore implements TimeStore {
       userDisplayName: user.displayName,
       projectId: project.id,
       projectName: project.name,
+      workType: 'legacy',
+      clientId: null,
+      clientName: null,
+      clientExternalId: null,
+      clientCode: null,
+      jobId: null,
+      jobName: null,
+      jobExternalId: null,
+      jobCode: null,
+      internalActivityId: null,
+      activityName: null,
+      billable: false,
+      legacy: true,
       notes,
       startAt: startAt.toISOString(),
       endAt: endAt?.toISOString() ?? null,

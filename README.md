@@ -2,7 +2,7 @@
 
 Timekeeper is a private firm timekeeping application built for Cloudflare Workers. Employees sign in with their existing Versatile Accounting Microsoft 365 account, record their own time, and retain one independent running timer each. Alex and Brendon have administrator reporting access across the firm.
 
-One Worker serves the React interface and Hono API, Cloudflare D1 stores durable data, and a Cron Trigger emails a consolidated Monday-to-Sunday Excel report every Monday at 12:05 AM Brisbane time.
+One Worker serves the React interface and Hono API, Cloudflare D1 stores durable data, a nightly Cron Trigger synchronises FYI clients and jobs, and a second Cron Trigger emails a consolidated Monday-to-Sunday Excel report every Monday at 12:05 AM Brisbane time.
 
 ## Features
 
@@ -11,11 +11,15 @@ One Worker serves the React interface and Hono API, Cloudflare D1 stores durable
 - Automatic employee provisioning on first sign-in, using the Access subject and optional Entra object ID
 - Employee isolation for timers, entries, edits, and deletion
 - One database-enforced active timer per employee, restored after refresh or reopening
-- Shared reusable projects, optional notes, and manual completed entries
-- Brisbane-aware daily, weekly, history, filtered, and per-project totals
+- Client work classified by FYI client, FYI job, billable status, and optional notes
+- Controlled non-billable internal activities for administration, training, leave, business development, and meetings
+- Immutable client/job/activity snapshots so renamed or archived master data never rewrites history
+- Nightly read-only FYI synchronisation, admin manual refresh, status audit, and validated CSV fallback import
+- Brisbane-aware daily, weekly, history, client, job, billable, internal, and utilisation totals
 - Correct allocation of entries crossing Brisbane midnight
 - Admin-only consolidated history and employee filtering
-- Admin-only print-ready Excel reports containing employee, date, times, duration, project, notes, daily totals, employee totals, project totals, and the entire-week total
+- Admin-only exception monitoring for long/running timers, missing classifications, and legacy entries
+- Admin-only branded Excel reports containing employee, client, job, external IDs, billable status, notes, daily totals, utilisation, and firm summaries
 - Resend email delivery with D1 and provider idempotency protection
 - Cloudflare Cron execution at the end of the Brisbane work week
 
@@ -28,7 +32,7 @@ One Worker serves the React interface and Hono API, Cloudflare D1 stores durable
 - **Database:** Cloudflare D1
 - **Reports:** ExcelJS in the Worker runtime
 - **Email:** Resend HTTPS API with an Excel attachment
-- **Schedule:** Cloudflare Cron Trigger `5 14 * * SUN` UTC
+- **Schedules:** `15 16 * * *` UTC for nightly FYI sync (2:15 AM Brisbane) and `5 14 * * SUN` UTC for weekly delivery
 
 Cloudflare Access is the outer security boundary and the Worker validates the Access application token as defense in depth. Do not deploy this version until Access is enabled for the Worker hostname and both Access validation values have been configured.
 
@@ -37,7 +41,22 @@ Cloudflare Access is the outer security boundary and the Worker validates the Ac
 1. A Microsoft Entra administrator who can create an app registration, grant Graph consent, and create a client secret.
 2. A Cloudflare account with Workers, D1, and Zero Trust Access enabled.
 3. A Resend account with the sending domain verified.
-4. Node.js 22 or later and Wrangler authentication for local deployment.
+4. FYI Single Practice API access for the client/job synchronisation (CSV import works while access is being arranged).
+5. Node.js 22 or later and Wrangler authentication for local deployment.
+
+## FYI client and job setup
+
+Request Single Practice API access from `developers@fyi.app`. Timekeeper reads clients and jobs only; it never creates or updates records in FYI.
+
+Set the issued values as encrypted Worker secrets:
+
+```powershell
+npx wrangler secret put FYI_ACCESS_ID
+npx wrangler secret put FYI_ACCESS_SECRET
+npx wrangler secret put FYI_APPLICATION_ID
+```
+
+The Australian API base URL is tracked as `FYI_API_BASE_URL`. The nightly sync archives local selections that disappear from FYI while retaining their snapshots on historical entries. Until credentials are configured, an administrator can import a CSV containing `client_external_id`, `client_name`, `job_external_id`, and `job_name`. Optional columns are `client_code`, `export_code`, `manager`, `partner`, `client_active`, `job_code`, `job_status`, and `job_active`.
 
 ## Microsoft Entra ID setup
 
@@ -167,25 +186,31 @@ Do not apply migration `0002` while the old shared-password Worker must remain o
 
 ## Environment and bindings
 
-| Binding                    | Storage                      | Required       | Purpose                                              |
-| -------------------------- | ---------------------------- | -------------- | ---------------------------------------------------- |
-| `DB`                       | Wrangler D1 binding          | Yes            | Users, projects, entries, and delivery audit records |
-| `ASSETS`                   | Worker Static Assets binding | Yes            | React application                                    |
-| `ACCESS_TEAM_DOMAIN`       | Worker secret                | Production     | Access issuer and signing-key location               |
-| `ACCESS_AUD`               | Worker secret                | Production     | Expected Access application audience                 |
-| `ALLOWED_EMAIL_DOMAIN`     | Tracked Worker variable      | Yes            | Defense-in-depth company-domain restriction          |
-| `ADMIN_EMAILS`             | Tracked Worker variable      | Yes            | Comma-separated reporting administrators             |
-| `LOCAL_DEV_IDENTITY_EMAIL` | Local `.dev.vars` only       | Local optional | Localhost-only development identity                  |
-| `RESEND_API_KEY`           | Worker secret                | Email          | Sending-only Resend credential                       |
-| `EMAIL_FROM`               | Worker secret                | Email          | Verified report sender                               |
-| `WEEKLY_REPORT_RECIPIENT`  | Worker secret                | Email          | Scheduled consolidated-report recipient              |
-| `REPORT_TEST_RECIPIENT`    | Worker secret                | Email          | Manual test recipient                                |
+| Binding                     | Storage                      | Required       | Purpose                                              |
+| --------------------------- | ---------------------------- | -------------- | ---------------------------------------------------- |
+| `DB`                        | Wrangler D1 binding          | Yes            | Users, projects, entries, and delivery audit records |
+| `ASSETS`                    | Worker Static Assets binding | Yes            | React application                                    |
+| `ACCESS_TEAM_DOMAIN`        | Worker secret                | Production     | Access issuer and signing-key location               |
+| `ACCESS_AUD`                | Worker secret                | Production     | Expected Access application audience                 |
+| `ALLOWED_EMAIL_DOMAIN`      | Tracked Worker variable      | Yes            | Defense-in-depth company-domain restriction          |
+| `ADMIN_EMAILS`              | Tracked Worker variable      | Yes            | Comma-separated reporting administrators             |
+| `LOCAL_DEV_IDENTITY_EMAIL`  | Local `.dev.vars` only       | Local optional | Localhost-only development identity                  |
+| `RESEND_API_KEY`            | Worker secret                | Email          | Sending-only Resend credential                       |
+| `EMAIL_FROM`                | Worker secret                | Email          | Verified report sender                               |
+| `WEEKLY_REPORT_RECIPIENT`   | Worker secret                | Email          | Scheduled consolidated-report recipient              |
+| `REPORT_TEST_RECIPIENT`     | Worker secret                | Email          | Manual test recipient                                |
+| `FYI_ACCESS_ID`             | Worker secret                | FYI sync       | Practice API access identifier                       |
+| `FYI_ACCESS_SECRET`         | Worker secret                | FYI sync       | Practice API access secret                           |
+| `FYI_APPLICATION_ID`        | Worker secret                | FYI sync       | FYI application identifier                           |
+| `FYI_API_BASE_URL`          | Tracked Worker variable      | Yes            | Regional FYI external API base URL                   |
+| `RUNNING_TIMER_ALERT_HOURS` | Tracked Worker variable      | Yes            | Admin running-timer exception threshold              |
+| `LONG_ENTRY_ALERT_HOURS`    | Tracked Worker variable      | Yes            | Admin completed-entry exception threshold            |
 
 Alex and Brendon are configured as administrators in `wrangler.jsonc`. Changing administrators requires a reviewed configuration change and redeployment; it cannot be self-escalated from the UI.
 
 ## Local development
 
-Copy `.dev.vars.example` to `.dev.vars`. Use non-production email settings and set `LOCAL_DEV_IDENTITY_EMAIL` to a test address ending in the allowed domain. This local identity is accepted only when the request hostname is `localhost` or `127.0.0.1`; it cannot bypass authentication on the deployed Worker.
+Copy `.env.example` to `.dev.vars`. Use non-production email settings and set `LOCAL_DEV_IDENTITY_EMAIL` to a test address ending in the allowed domain. This local identity is accepted only when the request hostname is `localhost` or `127.0.0.1`; it cannot bypass authentication on the deployed Worker.
 
 ```powershell
 Copy-Item .dev.vars.example .dev.vars

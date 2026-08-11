@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "timekeeper",
   "main": "worker/index.ts",
-  "compatibility_date": "2026-08-06",
+  "compatibility_date": "2026-08-08",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "directory": "./dist/client",
@@ -19,7 +19,7 @@
     },
   ],
   "triggers": {
-    "crons": ["5 14 * * SUN"],
+    "crons": ["5 14 * * SUN", "15 16 * * *"],
   },
   "observability": {
     "enabled": true,
@@ -27,6 +27,9 @@
   "vars": {
     "ALLOWED_EMAIL_DOMAIN": "versatileaccounting.com.au",
     "ADMIN_EMAILS": "alexg@versatileaccounting.com.au,brendong@versatileaccounting.com.au",
+    "FYI_API_BASE_URL": "https://api-ap-southeast-2.fyi.app/external",
+    "RUNNING_TIMER_ALERT_HOURS": "12",
+    "LONG_ENTRY_ALERT_HOURS": "16",
   },
   "secrets": {
     "required": [

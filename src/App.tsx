@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
-import { api, ApiError, downloadReport } from './api';
+import { api, downloadReport } from './api';
 import {
   formatDate,
   formatDuration,
@@ -9,15 +9,222 @@ import {
   todayBrisbane,
 } from './format';
 import type {
+  Catalog,
   DashboardData,
   Entry,
   HistoryData,
-  Project,
+  PracticeData,
   SessionData,
   SignedInUser,
+  WorkPayload,
 } from './types';
 
-type View = 'dashboard' | 'history' | 'reports';
+type View = 'dashboard' | 'history' | 'reports' | 'practice';
+type WorkForm = {
+  workType: 'client' | 'internal';
+  clientId: string;
+  jobId: string;
+  internalActivityId: string;
+  billable: boolean;
+  notes: string;
+};
+function emptyWork(catalog?: Catalog): WorkForm {
+  const recentJob = catalog?.jobs.find(
+    (job) => job.id === localStorage.getItem('timekeeper:last-job'),
+  );
+  return {
+    workType: 'client',
+    clientId: recentJob?.clientId ?? '',
+    jobId: recentJob?.id ?? '',
+    internalActivityId: catalog?.internalActivities[0]?.id ?? '',
+    billable: recentJob?.defaultBillable ?? true,
+    notes: '',
+  };
+}
+function payload(value: WorkForm): WorkPayload {
+  return value.workType === 'client'
+    ? {
+        workType: 'client',
+        clientId: value.clientId,
+        jobId: value.jobId,
+        billable: value.billable,
+        notes: value.notes,
+      }
+    : {
+        workType: 'internal',
+        internalActivityId: value.internalActivityId,
+        billable: false,
+        notes: value.notes,
+      };
+}
+function formFromEntry(entry: Entry | null, catalog: Catalog): WorkForm {
+  if (entry?.workType === 'client')
+    return {
+      workType: 'client',
+      clientId: entry.clientId ?? '',
+      jobId: entry.jobId ?? '',
+      internalActivityId: catalog.internalActivities[0]?.id ?? '',
+      billable: entry.billable,
+      notes: entry.notes,
+    };
+  return {
+    workType: 'internal',
+    clientId: '',
+    jobId: '',
+    internalActivityId: entry?.internalActivityId ?? catalog.internalActivities[0]?.id ?? '',
+    billable: false,
+    notes: entry?.notes ?? '',
+  };
+}
+
+function WorkFields({
+  value,
+  onChange,
+  catalog,
+  compact = false,
+}: {
+  value: WorkForm;
+  onChange: (value: WorkForm) => void;
+  catalog: Catalog;
+  compact?: boolean;
+}) {
+  const [clientSearch, setClientSearch] = useState('');
+  const [matchedClients, setMatchedClients] = useState(catalog.clients);
+  useEffect(() => {
+    const query = clientSearch.trim();
+    if (query.length < 2) {
+      setMatchedClients(catalog.clients);
+      return;
+    }
+    let current = true;
+    const timer = window.setTimeout(() => {
+      api<Catalog>(`/api/catalog?search=${encodeURIComponent(query)}`)
+        .then((result) => current && setMatchedClients(result.clients))
+        .catch(() => current && setMatchedClients(catalog.clients));
+    }, 250);
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
+  }, [catalog.clients, clientSearch]);
+  const clients = useMemo(() => matchedClients, [matchedClients]);
+  const jobs = useMemo(
+    () => catalog.jobs.filter((job) => job.clientId === value.clientId),
+    [catalog.jobs, value.clientId],
+  );
+  const chooseClient = (clientId: string) =>
+    onChange({ ...value, clientId, jobId: '', billable: true });
+  const chooseJob = (jobId: string) => {
+    const job = catalog.jobs.find((item) => item.id === jobId);
+    onChange({ ...value, jobId, billable: job?.defaultBillable ?? true });
+    if (jobId) localStorage.setItem('timekeeper:last-job', jobId);
+  };
+  return (
+    <div className={`work-fields ${compact ? 'compact-fields' : ''}`}>
+      <fieldset className="work-type">
+        <legend>Work type</legend>
+        <button
+          type="button"
+          className={value.workType === 'client' ? 'selected' : ''}
+          onClick={() => onChange({ ...value, workType: 'client' })}
+        >
+          Client work
+        </button>
+        <button
+          type="button"
+          className={value.workType === 'internal' ? 'selected' : ''}
+          onClick={() => onChange({ ...value, workType: 'internal', billable: false })}
+        >
+          Internal work
+        </button>
+      </fieldset>
+      {value.workType === 'client' ? (
+        <>
+          <label>
+            Client
+            <input
+              className="catalog-search"
+              value={clientSearch}
+              onChange={(event) => setClientSearch(event.target.value)}
+              placeholder="Search clients"
+              aria-label="Search clients"
+            />
+            <select
+              value={value.clientId}
+              onChange={(event) => chooseClient(event.target.value)}
+              required
+            >
+              <option value="">Choose client</option>
+              {clients.map((client) => (
+                <option key={client.id} value={client.id}>
+                  {client.name}
+                  {client.clientCode ? ` (${client.clientCode})` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Project / activity
+            <select
+              value={value.jobId}
+              onChange={(event) => chooseJob(event.target.value)}
+              required
+              disabled={!value.clientId}
+            >
+              <option value="">
+                {value.clientId ? 'Choose FYI job' : 'Choose a client first'}
+              </option>
+              {jobs.map((job) => (
+                <option key={job.id} value={job.id}>
+                  {job.name}
+                  {job.jobCode ? ` (${job.jobCode})` : ''}
+                </option>
+              ))}
+            </select>
+            {value.clientId && !jobs.length && (
+              <small className="field-help">
+                No active FYI jobs are available for this client. Ask an admin to sync FYI.
+              </small>
+            )}
+          </label>
+          <label className="billable-control">
+            <input
+              type="checkbox"
+              checked={value.billable}
+              onChange={(event) => onChange({ ...value, billable: event.target.checked })}
+            />{' '}
+            Billable
+          </label>
+        </>
+      ) : (
+        <label>
+          Internal activity
+          <select
+            value={value.internalActivityId}
+            onChange={(event) => onChange({ ...value, internalActivityId: event.target.value })}
+            required
+          >
+            <option value="">Choose activity</option>
+            {catalog.internalActivities.map((activity) => (
+              <option key={activity.id} value={activity.id}>
+                {activity.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      <label className="notes-field">
+        Notes <span>Optional</span>
+        <input
+          value={value.notes}
+          onChange={(event) => onChange({ ...value, notes: event.target.value })}
+          maxLength={2000}
+          placeholder="What are you working on?"
+        />
+      </label>
+    </div>
+  );
+}
 
 function EntryRows({
   entries,
@@ -43,11 +250,23 @@ function EntryRows({
         return (
           <article className="entry-row" key={entry.id}>
             <div className="entry-main">
-              <strong>{entry.projectName}</strong>
-              <span className="employee-name">{entry.userDisplayName}</span>
-              <span className="time-range">
-                {formatTime(entry.startAt)} – {entry.endAt ? formatTime(entry.endAt) : 'Running'}
-              </span>
+              <div className="entry-title">
+                <strong>
+                  {entry.clientName ??
+                    (entry.workType === 'internal' ? 'Internal' : 'Legacy entry')}
+                </strong>
+                <span>{entry.jobName ?? entry.activityName ?? entry.projectName}</span>
+              </div>
+              <div className="entry-meta">
+                <span>{entry.userDisplayName}</span>
+                <span>
+                  {formatTime(entry.startAt)} - {entry.endAt ? formatTime(entry.endAt) : 'Running'}
+                </span>
+                <span className={`tag ${entry.billable ? 'billable' : ''}`}>
+                  {entry.billable ? 'Billable' : 'Non-billable'}
+                </span>
+                {entry.legacy && <span className="tag warning">Legacy</span>}
+              </div>
               {entry.notes && <p>{entry.notes}</p>}
             </div>
             <div className="entry-side">
@@ -72,24 +291,18 @@ function EntryRows({
 
 function EntryDialog({
   entry,
-  projects,
+  catalog,
   onClose,
   onSave,
 }: {
   entry: Entry | null;
-  projects: Project[];
+  catalog: Catalog;
   onClose: () => void;
-  onSave: (data: {
-    projectName: string;
-    notes: string;
-    startLocal: string;
-    endLocal: string;
-  }) => Promise<void>;
+  onSave: (data: WorkPayload & { startLocal: string; endLocal: string }) => Promise<void>;
 }) {
   const current = new Date();
   const oneHourAgo = new Date(current.getTime() - 3_600_000);
-  const [projectName, setProjectName] = useState(entry?.projectName ?? '');
-  const [notes, setNotes] = useState(entry?.notes ?? '');
+  const [work, setWork] = useState(() => formFromEntry(entry, catalog));
   const [startLocal, setStartLocal] = useState(
     entry ? toBrisbaneLocalInput(entry.startAt) : toBrisbaneLocalInput(oneHourAgo.toISOString()),
   );
@@ -103,7 +316,7 @@ function EntryDialog({
     setSaving(true);
     setError('');
     try {
-      await onSave({ projectName, notes, startLocal, endLocal });
+      await onSave({ ...payload(work), startLocal, endLocal });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to save the entry.');
       setSaving(false);
@@ -125,22 +338,13 @@ function EntryDialog({
             ×
           </button>
         </div>
+        {entry?.legacy && (
+          <div className="message warning">Classify this legacy entry before saving.</div>
+        )}
         <form onSubmit={submit} className="form-grid">
-          <label className="span-2">
-            Project / activity
-            <input
-              list="dialog-projects"
-              value={projectName}
-              onChange={(event) => setProjectName(event.target.value)}
-              maxLength={120}
-              required
-            />
-            <datalist id="dialog-projects">
-              {projects.map((project) => (
-                <option value={project.name} key={project.id} />
-              ))}
-            </datalist>
-          </label>
+          <div className="span-2">
+            <WorkFields value={work} onChange={setWork} catalog={catalog} />
+          </div>
           <label>
             Clock in <span className="timezone">Brisbane</span>
             <input
@@ -159,15 +363,6 @@ function EntryDialog({
               required
             />
           </label>
-          <label className="span-2">
-            Notes <span className="optional">Optional</span>
-            <textarea
-              value={notes}
-              onChange={(event) => setNotes(event.target.value)}
-              maxLength={2000}
-              rows={4}
-            />
-          </label>
           {error && (
             <div className="message error span-2" role="alert">
               {error}
@@ -178,7 +373,7 @@ function EntryDialog({
               Cancel
             </button>
             <button className="button primary" disabled={saving}>
-              {saving ? 'Saving…' : 'Save entry'}
+              {saving ? 'Saving...' : 'Save entry'}
             </button>
           </div>
         </form>
@@ -202,41 +397,43 @@ function Dashboard({
   editEntry: (entry: Entry) => void;
   deleteEntry: (entry: Entry) => void;
 }) {
-  const [projectName, setProjectName] = useState('');
-  const [notes, setNotes] = useState('');
+  const [work, setWork] = useState(() => emptyWork(data.catalog));
   const [working, setWorking] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
+  const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
+  useEffect(() => {
+    if (!work.internalActivityId && data.catalog.internalActivities[0])
+      setWork((value) => ({ ...value, internalActivityId: data.catalog.internalActivities[0].id }));
+  }, [data.catalog.internalActivities, work.internalActivityId]);
   async function clockIn(event: FormEvent) {
     event.preventDefault();
     setWorking(true);
-    setError('');
-    setSuccess('');
+    setMessage(null);
     try {
-      await api(
-        '/api/clock-in',
-        { method: 'POST', body: JSON.stringify({ projectName, notes }) },
-        csrf,
-      );
-      setNotes('');
+      await api('/api/clock-in', { method: 'POST', body: JSON.stringify(payload(work)) }, csrf);
+      setWork((value) => ({ ...value, notes: '' }));
       await refresh();
-      setSuccess('Clocked in successfully.');
+      setMessage({ kind: 'success', text: 'Clocked in successfully.' });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to clock in.');
+      setMessage({
+        kind: 'error',
+        text: caught instanceof Error ? caught.message : 'Unable to clock in.',
+      });
     } finally {
       setWorking(false);
     }
   }
   async function clockOut() {
     setWorking(true);
-    setError('');
-    setSuccess('');
+    setMessage(null);
     try {
       await api('/api/clock-out', { method: 'POST' }, csrf);
       await refresh();
-      setSuccess('Clocked out successfully.');
+      setMessage({ kind: 'success', text: 'Clocked out successfully.' });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to clock out.');
+      setMessage({
+        kind: 'error',
+        text: caught instanceof Error ? caught.message : 'Unable to clock out.',
+      });
     } finally {
       setWorking(false);
     }
@@ -252,86 +449,72 @@ function Dashboard({
         {data.active ? (
           <div className="active-timer">
             <div>
-              <p className="eyebrow">{data.active.projectName}</p>
+              <p className="eyebrow">
+                {data.active.clientName ??
+                  (data.active.workType === 'internal' ? 'Internal' : 'Legacy')}
+              </p>
+              <h1>{data.active.jobName ?? data.active.activityName ?? data.active.projectName}</h1>
               <div className="timer-digits">{formatDuration(activeMs)}</div>
               <p className="muted">
                 Started {formatTime(data.active.startAt)} on {formatDate(data.active.startAt)}
               </p>
               {data.active.notes && <p className="active-notes">{data.active.notes}</p>}
             </div>
-            <button className="button stop large" onClick={clockOut} disabled={working}>
-              {working ? 'Stopping…' : 'Clock out'}
+            <button className="button attention large" onClick={clockOut} disabled={working}>
+              {working ? 'Stopping...' : 'Clock out'}
             </button>
           </div>
-        ) : (
+        ) : data.catalog.clients.length || data.catalog.internalActivities.length ? (
           <form onSubmit={clockIn} className="clock-form">
-            <label>
-              Project / activity
-              <input
-                list="projects"
-                value={projectName}
-                onChange={(event) => setProjectName(event.target.value)}
-                placeholder="Choose or enter a new activity"
-                required
-                maxLength={120}
-              />
-              <datalist id="projects">
-                {data.projects.map((project) => (
-                  <option value={project.name} key={project.id} />
-                ))}
-              </datalist>
-            </label>
-            <label>
-              Notes <span className="optional">Optional</span>
-              <input
-                value={notes}
-                onChange={(event) => setNotes(event.target.value)}
-                placeholder="What are you working on?"
-                maxLength={2000}
-              />
-            </label>
-            <button className="button start large" disabled={working}>
-              {working ? 'Starting…' : 'Clock in'}
+            <WorkFields value={work} onChange={setWork} catalog={data.catalog} compact />
+            <button className="button gold large clock-action" disabled={working}>
+              {working ? 'Starting...' : 'Clock in'}
             </button>
           </form>
-        )}
-        {error && (
-          <div className="message error" role="alert">
-            {error}
+        ) : (
+          <div className="catalog-empty">
+            <strong>No work catalogue is available yet.</strong>
+            <p>
+              An administrator can sync FYI or import the client and job CSV. Internal activities
+              remain available after the database migration.
+            </p>
           </div>
         )}
-        {success && (
-          <div className="message success" role="status">
-            {success}
+        {message && (
+          <div
+            className={`message ${message.kind}`}
+            role={message.kind === 'error' ? 'alert' : 'status'}
+          >
+            {message.text}
           </div>
         )}
       </section>
-
-      <div className="summary-grid">
-        <section className="metric-card">
-          <p>Today</p>
-          <strong>{formatDuration(data.today.totalMs)}</strong>
-          <span>
-            {data.today.entries.length} {data.today.entries.length === 1 ? 'entry' : 'entries'}
-          </span>
-        </section>
-        <section className="metric-card">
-          <p>This week</p>
-          <strong>{formatDuration(data.week.totalMs)}</strong>
-          <span>
-            {formatDate(data.week.start)} – {formatDate(data.week.end)}
-          </span>
-        </section>
+      <div className="metric-grid">
+        <Metric
+          label="Today"
+          value={formatDuration(data.today.totalMs)}
+          detail={`${data.today.entries.length} entries`}
+        />
+        <Metric
+          label="This week"
+          value={formatDuration(data.week.totalMs)}
+          detail={`${formatDate(data.week.start)} - ${formatDate(data.week.end)}`}
+        />
+        <Metric
+          label="Billable"
+          value={formatDuration(data.week.billableMs)}
+          detail={`${data.week.utilisationPercent}% utilisation`}
+        />
+        <Metric label="Internal" value={formatDuration(data.week.internalMs)} detail="This week" />
       </div>
-
       <div className="dashboard-grid">
         <section className="panel">
           <div className="panel-heading">
             <div>
               <p className="eyebrow">{formatDate(data.today.date)}</p>
-              <h2>Today’s entries</h2>
+              <h2>Today's entries</h2>
             </div>
-            <span className="total-pill">{formatDuration(data.today.totalMs)}</span>
+            <span className="total-rule">{formatDuration(data.today.totalMs)}</span>
           </div>
           <EntryRows
             entries={data.today.entries}
@@ -344,40 +527,66 @@ function Dashboard({
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Monday to Sunday</p>
-              <h2>Weekly totals</h2>
+              <h2>Weekly mix</h2>
             </div>
           </div>
-          {data.week.projectTotals.length ? (
-            <div className="totals-list">
-              {data.week.projectTotals.map((item) => (
-                <div key={item.projectName}>
-                  <span>{item.projectName}</span>
-                  <strong>{formatDuration(item.totalMs)}</strong>
-                </div>
-              ))}
+          <div className="utilisation">
+            <strong>{data.week.utilisationPercent}%</strong>
+            <span>Billable utilisation</span>
+            <div>
+              <i style={{ width: `${Math.min(100, data.week.utilisationPercent)}%` }} />
             </div>
-          ) : (
-            <div className="empty">No time recorded this week.</div>
-          )}
+          </div>
+          <TotalsList
+            items={data.week.jobTotals.slice(0, 6)}
+            empty="No classified time this week."
+          />
         </section>
       </div>
     </>
   );
 }
+function Metric({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <section className="metric-card">
+      <p>{label}</p>
+      <strong>{value}</strong>
+      <span>{detail}</span>
+    </section>
+  );
+}
+function TotalsList({
+  items,
+  empty,
+}: {
+  items: { name: string; totalMs: number }[];
+  empty: string;
+}) {
+  return items.length ? (
+    <div className="totals-list">
+      {items.map((item) => (
+        <div key={item.name}>
+          <span>{item.name}</span>
+          <strong>{formatDuration(item.totalMs)}</strong>
+        </div>
+      ))}
+    </div>
+  ) : (
+    <div className="empty">{empty}</div>
+  );
+}
 
 function History({
-  projects,
+  catalog,
   user,
   users,
-  csrf,
   refreshKey,
   editEntry,
   deleteEntry,
 }: {
-  projects: Project[];
+  catalog: Catalog;
   user: SignedInUser;
   users: SignedInUser[];
-  csrf: string;
   refreshKey: number;
   editEntry: (entry: Entry) => void;
   deleteEntry: (entry: Entry) => void;
@@ -385,10 +594,16 @@ function History({
   const today = todayBrisbane();
   const initial = new Date(`${today}T00:00:00+10:00`);
   initial.setDate(initial.getDate() - 29);
-  const [from, setFrom] = useState(localDate(initial.toISOString()));
-  const [to, setTo] = useState(today);
-  const [projectId, setProjectId] = useState('');
-  const [userId, setUserId] = useState('');
+  const [filters, setFilters] = useState({
+    from: localDate(initial.toISOString()),
+    to: today,
+    clientId: '',
+    jobId: '',
+    workType: '',
+    billable: '',
+    userId: '',
+    internalActivityId: '',
+  });
   const [data, setData] = useState<HistoryData | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -396,30 +611,35 @@ function History({
     setLoading(true);
     setError('');
     try {
-      const query = new URLSearchParams({ from, to });
-      if (projectId) query.set('projectId', projectId);
-      if (user.role === 'admin') {
-        query.set('scope', 'all');
-        if (userId) query.set('userId', userId);
-      }
-      setData(await api<HistoryData>(`/api/entries?${query}`));
+      const query = new URLSearchParams({ from: filters.from, to: filters.to });
+      Object.entries(filters).forEach(
+        ([key, value]) => value && !['from', 'to'].includes(key) && query.set(key, value),
+      );
+      if (user.role === 'admin') query.set('scope', 'all');
+      setData(await api(`/api/entries?${query}`));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to load history.');
     } finally {
       setLoading(false);
     }
-  }, [from, to, projectId, user.role, userId]);
+  }, [filters, user.role]);
   useEffect(() => {
     void load();
-  }, [load, csrf, refreshKey]);
+  }, [load, refreshKey]);
   const groups = useMemo(() => {
-    const grouped = new Map<string, Entry[]>();
+    const result = new Map<string, Entry[]>();
     for (const entry of data?.entries ?? []) {
       const date = localDate(entry.startAt);
-      grouped.set(date, [...(grouped.get(date) ?? []), entry]);
+      result.set(date, [...(result.get(date) ?? []), entry]);
     }
-    return grouped;
+    return result;
   }, [data]);
+  const set = (key: keyof typeof filters, value: string) =>
+    setFilters((current) => ({
+      ...current,
+      [key]: value,
+      ...(key === 'clientId' ? { jobId: '' } : {}),
+    }));
   return (
     <section className="panel history-panel">
       <div className="panel-heading">
@@ -427,36 +647,66 @@ function History({
           <p className="eyebrow">Search and correct records</p>
           <h2>History</h2>
         </div>
-        {data && <span className="total-pill">{formatDuration(data.totalMs)}</span>}
+        {data && <span className="total-rule">{formatDuration(data.totalMs)}</span>}
       </div>
       <div className="filters">
         <label>
           From
-          <input type="date" value={from} onChange={(event) => setFrom(event.target.value)} />
+          <input type="date" value={filters.from} onChange={(e) => set('from', e.target.value)} />
         </label>
         <label>
           To
-          <input type="date" value={to} onChange={(event) => setTo(event.target.value)} />
+          <input type="date" value={filters.to} onChange={(e) => set('to', e.target.value)} />
         </label>
         <label>
-          Project
-          <select value={projectId} onChange={(event) => setProjectId(event.target.value)}>
-            <option value="">All projects</option>
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
+          Work type
+          <select value={filters.workType} onChange={(e) => set('workType', e.target.value)}>
+            <option value="">All work</option>
+            <option value="client">Client work</option>
+            <option value="internal">Internal work</option>
+            <option value="legacy">Legacy</option>
+          </select>
+        </label>
+        <label>
+          Client
+          <select value={filters.clientId} onChange={(e) => set('clientId', e.target.value)}>
+            <option value="">All clients</option>
+            {catalog.clients.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
               </option>
             ))}
+          </select>
+        </label>
+        <label>
+          Job
+          <select value={filters.jobId} onChange={(e) => set('jobId', e.target.value)}>
+            <option value="">All jobs</option>
+            {catalog.jobs
+              .filter((job) => !filters.clientId || job.clientId === filters.clientId)
+              .map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
+          </select>
+        </label>
+        <label>
+          Billable
+          <select value={filters.billable} onChange={(e) => set('billable', e.target.value)}>
+            <option value="">All</option>
+            <option value="true">Billable</option>
+            <option value="false">Non-billable</option>
           </select>
         </label>
         {user.role === 'admin' && (
           <label>
             Employee
-            <select value={userId} onChange={(event) => setUserId(event.target.value)}>
+            <select value={filters.userId} onChange={(e) => set('userId', e.target.value)}>
               <option value="">All employees</option>
               {users.map((item) => (
                 <option key={item.id} value={item.id}>
-                  {item.displayName} ({item.email})
+                  {item.displayName}
                 </option>
               ))}
             </select>
@@ -465,9 +715,9 @@ function History({
       </div>
       {error && <div className="message error">{error}</div>}
       {loading ? (
-        <div className="loading">Loading history…</div>
+        <div className="loading">Loading history...</div>
       ) : groups.size ? (
-        [...groups.entries()].map(([date, entries]) => (
+        [...groups].map(([date, entries]) => (
           <div className="date-group" key={date}>
             <div className="date-heading">
               <h3>{formatDate(date)}</h3>
@@ -498,20 +748,27 @@ function History({
       ) : (
         <div className="empty large-empty">
           <strong>No matching entries</strong>
-          <span>Try a wider date range or another project.</span>
+          <span>Try a wider date range or fewer filters.</span>
         </div>
       )}
-      {data && data.projectTotals.length > 0 && (
+      {data && (
         <div className="history-summary">
-          <h3>Project totals for this range</h3>
-          <div className="totals-list">
-            {data.projectTotals.map((item) => (
-              <div key={item.projectName}>
-                <span>{item.projectName}</span>
-                <strong>{formatDuration(item.totalMs)}</strong>
-              </div>
-            ))}
+          <h3>Range summary</h3>
+          <div className="summary-stats">
+            <span>
+              Client <strong>{formatDuration(data.clientMs)}</strong>
+            </span>
+            <span>
+              Internal <strong>{formatDuration(data.internalMs)}</strong>
+            </span>
+            <span>
+              Billable <strong>{formatDuration(data.billableMs)}</strong>
+            </span>
+            <span>
+              Utilisation <strong>{data.utilisationPercent}%</strong>
+            </span>
           </div>
+          <TotalsList items={data.clientTotals} empty="No client totals." />
         </div>
       )}
     </section>
@@ -520,23 +777,22 @@ function History({
 
 function Reports({ csrf }: { csrf: string }) {
   const [week, setWeek] = useState(todayBrisbane());
-  const [downloading, setDownloading] = useState(false);
-  const [sending, setSending] = useState(false);
+  const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   async function download() {
-    setDownloading(true);
+    setBusy('download');
     setMessage('');
     try {
       await downloadReport(week);
       setMessage('Excel report downloaded successfully.');
     } catch (caught) {
-      setMessage(caught instanceof Error ? caught.message : 'Unable to download the report.');
+      setMessage(caught instanceof Error ? caught.message : 'Unable to download report.');
     } finally {
-      setDownloading(false);
+      setBusy('');
     }
   }
-  async function sendTestEmail() {
-    setSending(true);
+  async function send() {
+    setBusy('send');
     setMessage('');
     try {
       const result = await api<{ sent: boolean; reason?: string }>(
@@ -547,14 +803,12 @@ function Reports({ csrf }: { csrf: string }) {
       setMessage(
         result.sent
           ? 'Test report emailed successfully.'
-          : result.reason === 'already-sent'
-            ? 'This week’s test report was already sent; no duplicate was created.'
-            : 'A test delivery is already in progress.',
+          : 'This test report has already been sent.',
       );
     } catch (caught) {
-      setMessage(caught instanceof Error ? caught.message : 'Unable to send the test report.');
+      setMessage(caught instanceof Error ? caught.message : 'Unable to send report.');
     } finally {
-      setSending(false);
+      setBusy('');
     }
   }
   return (
@@ -565,79 +819,279 @@ function Reports({ csrf }: { csrf: string }) {
           <p className="eyebrow">Monday to Sunday</p>
           <h2>Weekly Excel report</h2>
           <p className="muted">
-            A print-ready workbook with daily entries, daily totals, project totals, and the
-            complete weekly total.
+            Client, job, billable, employee and external-ID detail with daily and weekly summaries.
           </p>
         </div>
       </div>
       <div className="report-controls">
         <label>
           Choose any date in the week
-          <input type="date" value={week} onChange={(event) => setWeek(event.target.value)} />
+          <input type="date" value={week} onChange={(e) => setWeek(e.target.value)} />
         </label>
         <div className="report-buttons">
-          <button className="button secondary" onClick={sendTestEmail} disabled={sending}>
-            {sending ? 'Sending test…' : 'Send test email'}
+          <button className="button secondary" onClick={send} disabled={Boolean(busy)}>
+            {busy === 'send' ? 'Sending...' : 'Send test email'}
           </button>
-          <button className="button primary" onClick={download} disabled={downloading}>
-            {downloading ? 'Preparing workbook…' : 'Download .xlsx'}
+          <button className="button gold" onClick={download} disabled={Boolean(busy)}>
+            {busy === 'download' ? 'Preparing...' : 'Download .xlsx'}
           </button>
         </div>
       </div>
       {message && (
-        <div
-          className={`message ${message.toLowerCase().includes('unable') ? 'error' : 'success'}`}
-        >
+        <div className={`message ${message.includes('Unable') ? 'error' : 'success'}`}>
           {message}
         </div>
       )}
       <div className="report-details">
         <div>
           <strong>Brisbane time</strong>
-          <span>All clock times are converted from UTC.</span>
+          <span>Cross-midnight work is allocated to the correct local day.</span>
         </div>
         <div>
-          <strong>Cross-midnight accuracy</strong>
-          <span>Entries are allocated to each applicable date.</span>
+          <strong>Practice-ready</strong>
+          <span>Client and job external IDs support later WIP reconciliation.</span>
         </div>
         <div>
-          <strong>Excel-ready</strong>
-          <span>Formatted headings, widths, totals, and print settings.</span>
+          <strong>Brand aligned</strong>
+          <span>Archivo, Ledger Ink, Sand and restrained Versatile Gold.</span>
         </div>
       </div>
     </section>
   );
 }
 
+function Practice({ csrf }: { csrf: string }) {
+  const [data, setData] = useState<PracticeData | null>(null);
+  const [exceptions, setExceptions] = useState<{ entry: Entry; reasons: string[] }[]>([]);
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [newActivity, setNewActivity] = useState('');
+  const load = useCallback(async () => {
+    const [practice, exceptionData] = await Promise.all([
+      api<PracticeData>('/api/admin/practice'),
+      api<{ exceptions: { entry: Entry; reasons: string[] }[] }>('/api/admin/exceptions'),
+    ]);
+    setData(practice);
+    setExceptions(exceptionData.exceptions);
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  async function sync() {
+    setBusy(true);
+    setMessage('');
+    try {
+      await api('/api/admin/fyi-sync', { method: 'POST' }, csrf);
+      setMessage('FYI sync completed.');
+      await load();
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : 'FYI sync failed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function importCsv(file?: File) {
+    if (!file) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const csv = await file.text();
+      await api(
+        '/api/admin/catalog-import',
+        { method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: csv },
+        csrf,
+      );
+      setMessage('CSV catalogue imported.');
+      await load();
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : 'CSV import failed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function saveActivity(name: string, active: boolean, id?: string) {
+    await api(
+      '/api/admin/internal-activities',
+      { method: 'POST', body: JSON.stringify({ id, name, active }) },
+      csrf,
+    );
+    setNewActivity('');
+    await load();
+  }
+  async function setDefault(id: string, billable: boolean) {
+    await api(
+      `/api/admin/jobs/${id}/billable-default`,
+      { method: 'PUT', body: JSON.stringify({ billable }) },
+      csrf,
+    );
+    await load();
+  }
+  if (!data) return <div className="loading">Loading practice settings...</div>;
+  const syncSummary = data.latestSync
+    ? `${data.latestSync.status} ${new Date(data.latestSync.startedAt).toLocaleString('en-AU')}`
+    : 'Never synced';
+  return (
+    <div className="practice-grid">
+      <section className="panel span-wide">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Read-only master data</p>
+            <h2>FYI clients and jobs</h2>
+          </div>
+          <span className={`sync-badge ${data.latestSync?.status ?? ''}`}>{syncSummary}</span>
+        </div>
+        <p className="muted">
+          {data.clients.filter((item) => item.active).length} active clients ·{' '}
+          {data.jobs.filter((item) => item.active).length} active jobs
+        </p>
+        <div className="admin-actions">
+          <button className="button gold" disabled={busy || !data.fyiConfigured} onClick={sync}>
+            {busy ? 'Working...' : 'Sync FYI now'}
+          </button>
+          <label className="button secondary file-button">
+            Import CSV
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              onChange={(e) => void importCsv(e.target.files?.[0])}
+            />
+          </label>
+        </div>
+        {!data.fyiConfigured && (
+          <div className="message warning">
+            Configure FYI_ACCESS_ID, FYI_ACCESS_SECRET and FYI_APPLICATION_ID to enable API sync.
+            CSV import is available now.
+          </div>
+        )}
+        {data.latestSync?.errorMessage && (
+          <div className="message error">{data.latestSync.errorMessage}</div>
+        )}
+        {message && (
+          <div
+            className={`message ${message.toLowerCase().includes('fail') || message.toLowerCase().includes('unable') ? 'error' : 'success'}`}
+          >
+            {message}
+          </div>
+        )}
+      </section>
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Controlled list</p>
+            <h2>Internal activities</h2>
+          </div>
+        </div>
+        <form
+          className="inline-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (newActivity.trim()) void saveActivity(newActivity, true);
+          }}
+        >
+          <input
+            value={newActivity}
+            onChange={(e) => setNewActivity(e.target.value)}
+            placeholder="New activity"
+            maxLength={120}
+          />
+          <button className="button primary">Add</button>
+        </form>
+        <div className="settings-list">
+          {data.internalActivities.map((item) => (
+            <label key={item.id}>
+              <span>{item.name}</span>
+              <input
+                type="checkbox"
+                checked={item.active}
+                onChange={(e) => void saveActivity(item.name, e.target.checked, item.id)}
+              />
+            </label>
+          ))}
+        </div>
+      </section>
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Entry exceptions</p>
+            <h2>Needs attention</h2>
+          </div>
+          <span className="attention-count">{exceptions.length}</span>
+        </div>
+        {exceptions.length ? (
+          <div className="exception-list">
+            {exceptions.slice(0, 12).map(({ entry, reasons }) => (
+              <div key={entry.id}>
+                <strong>
+                  {entry.userDisplayName} · {entry.clientName ?? entry.projectName}
+                </strong>
+                <span>
+                  {reasons.join(', ')} · {formatDate(entry.startAt)}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty">No exceptions in the last 90 days.</div>
+        )}
+      </section>
+      <section className="panel span-wide">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Per-job defaults</p>
+            <h2>Billable settings</h2>
+          </div>
+        </div>
+        <div className="job-settings">
+          {data.jobs
+            .filter((item) => item.active)
+            .slice(0, 300)
+            .map((job) => {
+              const client = data.clients.find((item) => item.id === job.clientId);
+              return (
+                <label key={job.id}>
+                  <span>
+                    <strong>{client?.name}</strong>
+                    {job.name}
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={job.defaultBillable}
+                    onChange={(e) => void setDefault(job.id, e.target.checked)}
+                  />
+                </label>
+              );
+            })}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export default function App() {
-  const [sessionLoading, setSessionLoading] = useState(true);
   const [csrf, setCsrf] = useState('');
   const [user, setUser] = useState<SignedInUser | null>(null);
   const [users, setUsers] = useState<SignedInUser[]>([]);
-  const [sessionError, setSessionError] = useState('');
-  const [view, setView] = useState<View>('dashboard');
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [pageError, setPageError] = useState('');
+  const [view, setView] = useState<View>('dashboard');
+  const [now, setNow] = useState(Date.now());
+  const [loading, setLoading] = useState(true);
+  const [sessionLoading, setSessionLoading] = useState(true);
+  const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Entry | null>(null);
-  const [now, setNow] = useState(Date.now());
-  const [dataVersion, setDataVersion] = useState(0);
-
+  const [version, setVersion] = useState(0);
   const refresh = useCallback(async () => {
     setLoading(true);
-    setPageError('');
     try {
-      setDashboard(await api<DashboardData>('/api/dashboard'));
+      setDashboard(await api('/api/dashboard'));
+      setError('');
     } catch (caught) {
-      if (caught instanceof ApiError && caught.status === 401) setCsrf('');
-      else setPageError(caught instanceof Error ? caught.message : 'Unable to load the dashboard.');
+      setError(caught instanceof Error ? caught.message : 'Unable to load time.');
     } finally {
       setLoading(false);
     }
   }, []);
-
   useEffect(() => {
     api<SessionData>('/api/session')
       .then((result) => {
@@ -645,19 +1099,17 @@ export default function App() {
         setUser(result.user);
       })
       .catch((caught) =>
-        setSessionError(
+        setError(
           caught instanceof Error ? caught.message : 'Microsoft sign-in could not be verified.',
         ),
       )
       .finally(() => setSessionLoading(false));
   }, []);
   useEffect(() => {
-    if (user?.role !== 'admin') return;
-    api<{ users: SignedInUser[] }>('/api/users')
-      .then((result) => setUsers(result.users))
-      .catch((caught) =>
-        setPageError(caught instanceof Error ? caught.message : 'Unable to load employees.'),
-      );
+    if (user?.role === 'admin')
+      api<{ users: SignedInUser[] }>('/api/users')
+        .then((result) => setUsers(result.users))
+        .catch(() => undefined);
   }, [user]);
   useEffect(() => {
     if (csrf) void refresh();
@@ -666,12 +1118,6 @@ export default function App() {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-  useEffect(() => {
-    if (!notice) return;
-    const timer = window.setTimeout(() => setNotice(''), 4000);
-    return () => window.clearTimeout(timer);
-  }, [notice]);
-
   function openNew() {
     setEditing(null);
     setDialogOpen(true);
@@ -680,24 +1126,20 @@ export default function App() {
     setEditing(entry);
     setDialogOpen(true);
   }
-  async function saveEntry(data: {
-    projectName: string;
-    notes: string;
-    startLocal: string;
-    endLocal: string;
-  }) {
+  async function saveEntry(data: WorkPayload & { startLocal: string; endLocal: string }) {
     const path = editing ? `/api/entries/${editing.id}` : '/api/entries';
     await api(path, { method: editing ? 'PUT' : 'POST', body: JSON.stringify(data) }, csrf);
+    const edited = Boolean(editing);
     setDialogOpen(false);
     setEditing(null);
-    setNotice(editing ? 'Entry updated.' : 'Time entry added.');
+    setNotice(edited ? 'Entry updated.' : 'Time entry added.');
     await refresh();
-    setDataVersion((value) => value + 1);
+    setVersion((value) => value + 1);
   }
   async function deleteEntry(entry: Entry) {
     if (
       !window.confirm(
-        `Delete the ${entry.projectName} entry from ${formatDate(entry.startAt)}? This cannot be undone.`,
+        `Delete this ${entry.jobName ?? entry.activityName ?? entry.projectName} entry? This cannot be undone.`,
       )
     )
       return;
@@ -705,68 +1147,63 @@ export default function App() {
       await api(`/api/entries/${entry.id}`, { method: 'DELETE' }, csrf);
       setNotice('Entry deleted.');
       await refresh();
-      setDataVersion((value) => value + 1);
+      setVersion((value) => value + 1);
     } catch (caught) {
-      setPageError(caught instanceof Error ? caught.message : 'Unable to delete the entry.');
+      setError(caught instanceof Error ? caught.message : 'Unable to delete entry.');
     }
   }
-
   if (sessionLoading)
     return (
       <main className="splash">
-        <div className="brand-mark">T</div>
-        <p>Loading Timekeeper…</p>
+        <img src="/brand/va-mark.png" alt="" />
+        <p>Loading Timekeeper...</p>
       </main>
     );
   if (!csrf || !user)
     return (
       <main className="login-shell">
         <section className="login-card">
-          <div className="brand-mark" aria-hidden="true">
-            T
-          </div>
+          <img src="/brand/va-logo.png" alt="Versatile Accounting" />
           <p className="eyebrow">Private workspace</p>
           <h1>Microsoft sign-in required</h1>
           <p className="muted">
-            Timekeeper is available to Versatile Accounting Microsoft accounts through Cloudflare
-            Access.
+            Timekeeper is available to Versatile Accounting Microsoft accounts.
           </p>
-          {sessionError && <div className="message error">{sessionError}</div>}
-          <button className="button primary full" onClick={() => window.location.reload()}>
+          {error && <div className="message error">{error}</div>}
+          <button className="button gold full" onClick={() => window.location.reload()}>
             Sign in with Microsoft
           </button>
         </section>
       </main>
     );
+  const views: View[] =
+    user.role === 'admin'
+      ? ['dashboard', 'history', 'reports', 'practice']
+      : ['dashboard', 'history'];
   return (
     <div className="app-shell">
       <header className="app-header">
         <div className="brand">
-          <div className="brand-mark small">T</div>
+          <img src="/brand/va-logo.png" alt="Versatile Accounting" />
           <div>
             <strong>Timekeeper</strong>
             <span>Australia / Brisbane</span>
           </div>
         </div>
         <nav aria-label="Main navigation">
-          {(user.role === 'admin'
-            ? (['dashboard', 'history', 'reports'] as View[])
-            : (['dashboard', 'history'] as View[])
-          ).map((item) => (
+          {views.map((item) => (
             <button
               key={item}
               className={view === item ? 'selected' : ''}
               onClick={() => setView(item)}
             >
-              {item[0].toUpperCase() + item.slice(1)}
+              {item === 'practice' ? 'Practice admin' : item[0].toUpperCase() + item.slice(1)}
             </button>
           ))}
         </nav>
         <div className="header-actions">
-          <span className="signed-in-user" title={user.email}>
-            {user.displayName}
-          </span>
-          <button className="button secondary compact" onClick={openNew}>
+          <span className="signed-in-user">{user.displayName}</span>
+          <button className="button primary compact" onClick={openNew}>
             + Add time
           </button>
           <a className="link-button" href="/cdn-cgi/access/logout">
@@ -780,13 +1217,13 @@ export default function App() {
             {notice}
           </div>
         )}
-        {pageError && (
+        {error && (
           <div className="message error" role="alert">
-            {pageError}
+            {error}
           </div>
         )}
         {loading && !dashboard ? (
-          <div className="loading page-loading">Loading your time…</div>
+          <div className="loading">Loading your time...</div>
         ) : (
           dashboard &&
           (view === 'dashboard' ? (
@@ -800,23 +1237,24 @@ export default function App() {
             />
           ) : view === 'history' ? (
             <History
-              projects={dashboard.projects}
+              catalog={dashboard.catalog}
               user={user}
               users={users}
-              csrf={csrf}
-              refreshKey={dataVersion}
+              refreshKey={version}
               editEntry={openEdit}
               deleteEntry={deleteEntry}
             />
-          ) : (
+          ) : view === 'reports' ? (
             <Reports csrf={csrf} />
+          ) : (
+            <Practice csrf={csrf} />
           ))
         )}
       </main>
-      {dialogOpen && (
+      {dialogOpen && dashboard && (
         <EntryDialog
           entry={editing}
-          projects={dashboard?.projects ?? []}
+          catalog={dashboard.catalog}
           onClose={() => setDialogOpen(false)}
           onSave={saveEntry}
         />
