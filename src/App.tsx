@@ -46,7 +46,7 @@ function payload(value: WorkForm): WorkPayload {
     ? {
         workType: 'client',
         clientId: value.clientId,
-        jobId: value.jobId,
+        ...(value.jobId ? { jobId: value.jobId } : {}),
         billable: value.billable,
         notes: value.notes,
       }
@@ -164,15 +164,14 @@ function WorkFields({
             </select>
           </label>
           <label>
-            Project / activity
+            Project / activity <span>Optional for now</span>
             <select
               value={value.jobId}
               onChange={(event) => chooseJob(event.target.value)}
-              required
               disabled={!value.clientId}
             >
               <option value="">
-                {value.clientId ? 'Choose FYI job' : 'Choose a client first'}
+                {value.clientId ? 'No project / activity yet' : 'Choose a client first'}
               </option>
               {jobs.map((job) => (
                 <option key={job.id} value={job.id}>
@@ -183,7 +182,7 @@ function WorkFields({
             </select>
             {value.clientId && !jobs.length && (
               <small className="field-help">
-                No active FYI jobs are available for this client. Ask an admin to sync FYI.
+                No active FYI jobs are available. You can clock time now and classify it later.
               </small>
             )}
           </label>
@@ -255,7 +254,13 @@ function EntryRows({
                   {entry.clientName ??
                     (entry.workType === 'internal' ? 'Internal' : 'Legacy entry')}
                 </strong>
-                <span>{entry.jobName ?? entry.activityName ?? entry.projectName}</span>
+                <span>
+                  {entry.jobName ??
+                    entry.activityName ??
+                    (entry.workType === 'client'
+                      ? 'Unassigned project / activity'
+                      : entry.projectName)}
+                </span>
               </div>
               <div className="entry-meta">
                 <span>{entry.userDisplayName}</span>
@@ -453,7 +458,13 @@ function Dashboard({
                 {data.active.clientName ??
                   (data.active.workType === 'internal' ? 'Internal' : 'Legacy')}
               </p>
-              <h1>{data.active.jobName ?? data.active.activityName ?? data.active.projectName}</h1>
+              <h1>
+                {data.active.jobName ??
+                  data.active.activityName ??
+                  (data.active.workType === 'client'
+                    ? 'Unassigned project / activity'
+                    : data.active.projectName)}
+              </h1>
               <div className="timer-digits">{formatDuration(activeMs)}</div>
               <p className="muted">
                 Started {formatTime(data.active.startAt)} on {formatDate(data.active.startAt)}

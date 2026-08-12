@@ -31,7 +31,7 @@ type AppContext = { Bindings: Env; Variables: { actor: User } };
 const clientWorkSchema = z.object({
   workType: z.literal('client'),
   clientId: z.string().uuid(),
-  jobId: z.string().uuid(),
+  jobId: z.string().uuid().optional(),
   billable: z.boolean(),
   notes: z.string().trim().max(2000).default(''),
 });
@@ -51,7 +51,12 @@ const idSchema = z.string().uuid();
 
 function classification(input: z.infer<typeof workSchema>): WorkClassificationInput {
   return input.workType === 'client'
-    ? { workType: 'client', clientId: input.clientId, jobId: input.jobId, billable: input.billable }
+    ? {
+        workType: 'client',
+        clientId: input.clientId,
+        ...(input.jobId ? { jobId: input.jobId } : {}),
+        billable: input.billable,
+      }
     : { workType: 'internal', internalActivityId: input.internalActivityId, billable: false };
 }
 function parseCompletedEntry(input: z.infer<typeof entrySchema>) {
@@ -76,6 +81,8 @@ function classificationError(error: unknown): string | null {
   const messages: Record<string, string> = {
     INVALID_CLIENT_JOB: 'Choose a job belonging to the selected client.',
     INACTIVE_CLIENT_JOB: 'This client or job is archived and cannot be used for new time.',
+    INVALID_CLIENT: 'Choose a valid client.',
+    INACTIVE_CLIENT: 'This client is archived and cannot be used for new time.',
     INVALID_INTERNAL_ACTIVITY: 'Choose a valid internal activity.',
     INACTIVE_INTERNAL_ACTIVITY: 'This internal activity is inactive.',
   };
@@ -274,7 +281,7 @@ export function createApp(identityVerifier: IdentityVerifier = verifyAccessIdent
     if (!parsed.success)
       return context.json(
         {
-          error: 'Choose a valid client job or internal activity.',
+          error: 'Choose a valid client and optional job, or an internal activity.',
           details: parsed.error.flatten(),
         },
         400,

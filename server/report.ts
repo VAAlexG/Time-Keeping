@@ -15,7 +15,7 @@ function employeeLabel(entry: TimeEntry) {
   return `${entry.userDisplayName} (${entry.userEmail})`;
 }
 function workLabel(entry: TimeEntry) {
-  if (entry.workType === 'client') return entry.jobName ?? entry.projectName;
+  if (entry.workType === 'client') return entry.jobName ?? 'Unassigned project / activity';
   if (entry.workType === 'internal') return entry.activityName ?? entry.projectName;
   return entry.projectName;
 }

@@ -109,5 +109,5 @@ export interface PracticeData extends Catalog {
   fyiConfigured: boolean;
 }
 export type WorkPayload =
-  | { workType: 'client'; clientId: string; jobId: string; billable: boolean; notes: string }
+  | { workType: 'client'; clientId: string; jobId?: string; billable: boolean; notes: string }
   | { workType: 'internal'; internalActivityId: string; billable: false; notes: string };

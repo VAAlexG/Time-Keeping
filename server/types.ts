@@ -52,7 +52,7 @@ export interface InternalActivity {
 }
 
 export type WorkClassificationInput =
-  | { workType: 'client'; clientId: string; jobId: string; billable: boolean }
+  | { workType: 'client'; clientId: string; jobId?: string; billable: boolean }
   | { workType: 'internal'; internalActivityId: string; billable?: false };
 
 export interface TimeEntry {

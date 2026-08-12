@@ -175,6 +175,30 @@ describe('employee timekeeping isolation', () => {
     });
   });
 
+  it('allows client time to be recorded before an FYI job is available', async () => {
+    const employee = await signIn(EMPLOYEE);
+    const response = await call('/api/clock-in', {
+      method: 'POST',
+      headers: headers(employee),
+      body: JSON.stringify({
+        workType: 'client',
+        clientId: CLIENT_ID,
+        billable: true,
+        notes: 'Job to be assigned later',
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      entry: {
+        workType: 'client',
+        clientName: 'Northbridge Joinery',
+        jobId: null,
+        jobName: null,
+        billable: true,
+      },
+    });
+  });
+
   it('enforces one active timer per employee while allowing different employees to run timers', async () => {
     const alex = await signIn(ALEX);
     const employee = await signIn(EMPLOYEE);

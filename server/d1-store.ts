@@ -421,6 +421,37 @@ export class D1TimeStore implements TimeStore {
     input: WorkClassificationInput,
   ): Promise<ResolvedClassification> {
     if (input.workType === 'client') {
+      if (!input.jobId) {
+        const client = await this.db
+          .prepare(
+            `SELECT id, external_id, name, client_code, active FROM clients WHERE id = ? LIMIT 1`,
+          )
+          .bind(input.clientId)
+          .first<{
+            id: string;
+            external_id: string;
+            name: string;
+            client_code: string | null;
+            active: number;
+          }>();
+        if (!client) throw new Error('INVALID_CLIENT');
+        if (!client.active) throw new Error('INACTIVE_CLIENT');
+        return {
+          projectName: `${client.name} - Unassigned project / activity`,
+          workType: 'client',
+          clientId: client.id,
+          jobId: null,
+          internalActivityId: null,
+          billable: input.billable,
+          clientName: client.name,
+          clientExternalId: client.external_id,
+          clientCode: client.client_code,
+          jobName: null,
+          jobExternalId: null,
+          jobCode: null,
+          activityName: null,
+        };
+      }
       const row = await this.db
         .prepare(
           `SELECT j.id AS job_id, j.external_id AS job_external_id, j.name AS job_name,
