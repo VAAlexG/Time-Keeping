@@ -401,7 +401,18 @@ export function createApp(identityVerifier: IdentityVerifier = verifyAccessIdent
     if (denied) return denied;
     const csv = await context.req.text();
     if (!csv.trim()) return context.json({ error: 'Choose a non-empty CSV file.' }, 400);
-    return context.json({ counts: await importCatalogCsv(new D1TimeStore(context.env.DB), csv) });
+    try {
+      return context.json({ counts: await importCatalogCsv(new D1TimeStore(context.env.DB), csv) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (
+        message.startsWith('CSV ') ||
+        message.startsWith('Duplicate or missing ') ||
+        message.startsWith('Job ')
+      )
+        return context.json({ error: message }, 400);
+      throw error;
+    }
   });
   app.post('/api/admin/internal-activities', async (context) => {
     const denied = requireAdmin(context);

@@ -45,4 +45,18 @@ describe('practice catalogue import', () => {
     expect(latest).toMatchObject({ source: 'csv', status: 'failed' });
     expect(latest?.errorMessage).not.toContain('secret');
   });
+
+  it('imports clients that do not yet have a selectable job', async () => {
+    const clientOnly = `${csv}\nclient-3,Future Client,FC03,XPM-FC,true,,,,,`;
+    const counts = await importCatalogCsv(new D1TimeStore(env.DB), clientOnly);
+    expect(counts).toMatchObject({ clientsCreated: 3, jobsCreated: 3 });
+    expect(await new D1TimeStore(env.DB).listClients({ activeOnly: true })).toHaveLength(3);
+  });
+
+  it('rejects a partially populated job classification', async () => {
+    const partialJob = `${csv}\nclient-3,Future Client,FC03,XPM-FC,true,job-4,,,,`;
+    await expect(importCatalogCsv(new D1TimeStore(env.DB), partialJob)).rejects.toThrow(
+      'must include both a job external ID and job name',
+    );
+  });
 });

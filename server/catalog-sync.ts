@@ -170,26 +170,35 @@ export async function importCatalogCsv(store: D1TimeStore, csv: string): Promise
     const jobs: CatalogJobInput[] = [];
     for (const row of rows.slice(1)) {
       const clientExternalId = get(row, 'client_external_id');
+      const clientName = get(row, 'client_name');
       const jobExternalId = get(row, 'job_external_id');
+      const jobName = get(row, 'job_name');
+      if (!clientExternalId || !clientName)
+        throw new Error('CSV contains a row without a client external ID or client name.');
+      if (Boolean(jobExternalId) !== Boolean(jobName))
+        throw new Error(
+          `CSV job for client ${clientExternalId} must include both a job external ID and job name.`,
+        );
       const active = (name: string) =>
         !['false', '0', 'no', 'archived'].includes(get(row, name).toLowerCase());
       clients.set(clientExternalId, {
         externalId: clientExternalId,
-        name: get(row, 'client_name'),
+        name: clientName,
         clientCode: get(row, 'client_code') || null,
         exportCode: get(row, 'export_code') || null,
         managerName: get(row, 'manager') || null,
         partnerName: get(row, 'partner') || null,
         active: active('client_active'),
       });
-      jobs.push({
-        externalId: jobExternalId,
-        clientExternalId,
-        name: get(row, 'job_name'),
-        jobCode: get(row, 'job_code') || null,
-        status: get(row, 'job_status') || null,
-        active: active('job_active'),
-      });
+      if (jobExternalId && jobName)
+        jobs.push({
+          externalId: jobExternalId,
+          clientExternalId,
+          name: jobName,
+          jobCode: get(row, 'job_code') || null,
+          status: get(row, 'job_status') || null,
+          active: active('job_active'),
+        });
     }
     const counts = await store.syncCatalog('csv', [...clients.values()], jobs, false);
     await store.finishSync(runId, counts);
