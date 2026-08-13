@@ -12,6 +12,7 @@ One Worker serves the React interface and Hono API, Cloudflare D1 stores durable
 - Employee isolation for timers, entries, edits, and deletion
 - One database-enforced active timer per employee, restored after refresh or reopening
 - Client work classified by FYI client, FYI job, billable status, and optional notes
+- Shared priorities board for Alex, Brendon, and Suzie with 1–10 ranking and completion tracking
 - Controlled non-billable internal activities for administration, training, leave, business development, and meetings
 - Immutable client/job/activity snapshots so renamed or archived master data never rewrites history
 - Nightly read-only FYI synchronisation, admin manual refresh, status audit, and validated CSV fallback import

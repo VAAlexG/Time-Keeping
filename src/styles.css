@@ -870,6 +870,188 @@ nav button.selected {
   color: var(--attention);
   font-size: 0.74rem;
 }
+.priorities-page {
+  display: grid;
+  gap: 18px;
+}
+.priority-hero {
+  border-top: 5px solid var(--gold);
+}
+.priority-hero .muted {
+  margin: 7px 0 0;
+}
+.priority-total {
+  min-width: 72px;
+  display: grid;
+  justify-items: end;
+}
+.priority-total strong {
+  font-size: 2rem;
+  line-height: 1;
+}
+.priority-total span {
+  color: var(--slate);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.priority-form {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) 160px 150px auto;
+  align-items: end;
+  gap: 12px;
+  padding: 18px;
+  background: var(--sand);
+  border-left: 3px solid var(--gold);
+}
+.priority-form .button {
+  min-height: 42px;
+}
+.priority-hero .message {
+  margin: 14px 0 0;
+}
+.priority-board {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+.priority-column {
+  background: #fff;
+  border: 1px solid var(--line);
+  box-shadow: 0 6px 20px rgba(18, 18, 18, 0.035);
+  min-width: 0;
+}
+.priority-column-heading {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 17px 18px;
+  border-bottom: 2px solid var(--ink);
+}
+.priority-column-heading h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.priority-column-heading span {
+  color: var(--slate);
+  font-size: 0.72rem;
+}
+.person-initial {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  background: var(--ink);
+  color: #fff;
+  font-weight: 800;
+}
+.priority-list {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+.priority-card {
+  padding: 15px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--slate);
+}
+.priority-card.priority-medium {
+  border-left-color: var(--gold);
+}
+.priority-card.priority-high {
+  border-left-color: var(--attention);
+}
+.priority-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.priority-score {
+  min-width: 29px;
+  height: 29px;
+  display: grid;
+  place-items: center;
+  background: var(--ink);
+  color: #fff;
+  font-size: 0.79rem;
+  font-weight: 800;
+}
+.priority-high .priority-score {
+  background: var(--attention);
+}
+.priority-medium .priority-score {
+  background: var(--gold);
+  color: var(--ink);
+}
+.priority-card > p {
+  margin: 13px 0 16px;
+  line-height: 1.45;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.priority-controls {
+  display: grid;
+  grid-template-columns: 1fr 92px;
+  gap: 9px;
+}
+.priority-controls label {
+  color: var(--slate);
+  font-size: 0.67rem;
+}
+.priority-controls select {
+  padding: 8px 9px;
+  font-size: 0.78rem;
+}
+.complete-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 13px;
+  font-weight: 600;
+}
+.complete-control input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  accent-color: var(--growth);
+}
+.priority-empty {
+  padding: 28px 8px;
+}
+.completed-priorities {
+  margin-top: 2px;
+}
+.completed-list {
+  display: grid;
+}
+.completed-list article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 0;
+  border-top: 1px solid #e9e4db;
+}
+.completed-list article:first-child {
+  border-top: 0;
+}
+.completed-list .complete-control {
+  margin: 0;
+}
+.completed-list .complete-control > span {
+  display: grid;
+  gap: 2px;
+  color: var(--slate);
+  font-size: 0.72rem;
+  font-weight: 400;
+}
+.completed-list strong {
+  color: var(--ink);
+  font-size: 0.85rem;
+  text-decoration: line-through;
+}
 @media (max-width: 1050px) {
   .app-header {
     flex-wrap: wrap;
@@ -900,6 +1082,12 @@ nav button.selected {
   }
   .filters {
     grid-template-columns: repeat(3, 1fr);
+  }
+  .priority-form {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+  .priority-task-input {
+    grid-column: 1/-1;
   }
 }
 @media (max-width: 760px) {
@@ -946,6 +1134,9 @@ nav button.selected {
   .job-settings {
     grid-template-columns: 1fr;
   }
+  .priority-board {
+    grid-template-columns: 1fr;
+  }
   .modal .work-fields {
     grid-template-columns: 1fr 1fr;
   }
@@ -970,6 +1161,12 @@ nav button.selected {
   .report-details,
   .summary-stats {
     grid-template-columns: 1fr;
+  }
+  .priority-form {
+    grid-template-columns: 1fr;
+  }
+  .priority-task-input {
+    grid-column: 1;
   }
   .notes-field {
     grid-column: 1;

@@ -4,6 +4,7 @@ import { secureHeaders } from 'hono/secure-headers';
 import { z } from 'zod';
 import { importCatalogCsv, syncFromFyi } from '../server/catalog-sync';
 import { D1TimeStore } from '../server/d1-store';
+import { D1PriorityStore } from '../server/priority-store';
 import { createResendSender, sendWeeklyReport } from '../server/email';
 import { buildWeeklyWorkbook } from '../server/report';
 import {
@@ -48,6 +49,13 @@ const entrySchema = z.intersection(
 );
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const idSchema = z.string().uuid();
+const priorityAssigneeSchema = z.enum(['alex', 'brendon', 'suzie']);
+const priorityItemSchema = z.object({
+  title: z.string().trim().min(1).max(240),
+  assignee: priorityAssigneeSchema,
+  priority: z.number().int().min(1).max(10),
+});
+const priorityUpdateSchema = priorityItemSchema.extend({ completed: z.boolean() });
 
 function classification(input: z.infer<typeof workSchema>): WorkClassificationInput {
   return input.workType === 'client'
@@ -366,6 +374,37 @@ export function createApp(identityVerifier: IdentityVerifier = verifyAccessIdent
       entryId.data,
     );
     return deleted ? context.body(null, 204) : context.json({ error: 'Entry not found.' }, 404);
+  });
+
+  app.get('/api/priorities', async (context) => {
+    return context.json({ items: await new D1PriorityStore(context.env.DB).list() });
+  });
+  app.post('/api/priorities', async (context) => {
+    const parsed = priorityItemSchema.safeParse(await parseJson(context));
+    if (!parsed.success)
+      return context.json({ error: 'Add a task, assignee, and priority from 1 to 10.' }, 400);
+    const item = await new D1PriorityStore(context.env.DB).create({
+      ...parsed.data,
+      createdByUserId: context.get('actor').id,
+    });
+    return context.json({ item }, 201);
+  });
+  app.put('/api/priorities/:id', async (context) => {
+    const itemId = idSchema.safeParse(context.req.param('id'));
+    if (!itemId.success) return context.json({ error: 'Invalid priority item.' }, 400);
+    const parsed = priorityUpdateSchema.safeParse(await parseJson(context));
+    if (!parsed.success)
+      return context.json({ error: 'Check the task, assignee, and priority.' }, 400);
+    const item = await new D1PriorityStore(context.env.DB).update(itemId.data, parsed.data);
+    return item ? context.json({ item }) : context.json({ error: 'Priority item not found.' }, 404);
+  });
+  app.delete('/api/priorities/:id', async (context) => {
+    const itemId = idSchema.safeParse(context.req.param('id'));
+    if (!itemId.success) return context.json({ error: 'Invalid priority item.' }, 400);
+    const deleted = await new D1PriorityStore(context.env.DB).delete(itemId.data);
+    return deleted
+      ? context.body(null, 204)
+      : context.json({ error: 'Priority item not found.' }, 404);
   });
 
   app.get('/api/admin/practice', async (context) => {

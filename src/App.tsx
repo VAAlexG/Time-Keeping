@@ -14,12 +14,14 @@ import type {
   Entry,
   HistoryData,
   PracticeData,
+  PriorityAssignee,
+  PriorityItem,
   SessionData,
   SignedInUser,
   WorkPayload,
 } from './types';
 
-type View = 'dashboard' | 'history' | 'reports' | 'practice';
+type View = 'dashboard' | 'history' | 'priorities' | 'reports' | 'practice';
 type WorkForm = {
   workType: 'client' | 'internal';
   clientId: string;
@@ -786,6 +788,305 @@ function History({
   );
 }
 
+const PRIORITY_PEOPLE: { id: PriorityAssignee; name: string }[] = [
+  { id: 'alex', name: 'Alex' },
+  { id: 'brendon', name: 'Brendon' },
+  { id: 'suzie', name: 'Suzie' },
+];
+
+function Priorities({ csrf }: { csrf: string }) {
+  const [items, setItems] = useState<PriorityItem[]>([]);
+  const [title, setTitle] = useState('');
+  const [assignee, setAssignee] = useState<PriorityAssignee>('alex');
+  const [priority, setPriority] = useState(5);
+  const [loading, setLoading] = useState(true);
+  const [savingId, setSavingId] = useState('');
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result = await api<{ items: PriorityItem[] }>('/api/priorities');
+      setItems(result.items);
+      setError('');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Unable to load priorities.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function add(event: FormEvent) {
+    event.preventDefault();
+    setSavingId('new');
+    setError('');
+    try {
+      const result = await api<{ item: PriorityItem }>(
+        '/api/priorities',
+        {
+          method: 'POST',
+          body: JSON.stringify({ title, assignee, priority }),
+        },
+        csrf,
+      );
+      setItems((current) => [...current, result.item]);
+      setTitle('');
+      setPriority(5);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Unable to add the priority.');
+    } finally {
+      setSavingId('');
+    }
+  }
+
+  async function update(item: PriorityItem, changes: Partial<PriorityItem>) {
+    setSavingId(item.id);
+    setError('');
+    try {
+      const next = { ...item, ...changes };
+      const result = await api<{ item: PriorityItem }>(
+        `/api/priorities/${item.id}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            title: next.title,
+            assignee: next.assignee,
+            priority: next.priority,
+            completed: next.completed,
+          }),
+        },
+        csrf,
+      );
+      setItems((current) =>
+        current.map((candidate) => (candidate.id === item.id ? result.item : candidate)),
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Unable to update the priority.');
+    } finally {
+      setSavingId('');
+    }
+  }
+
+  async function remove(item: PriorityItem) {
+    if (!window.confirm(`Remove “${item.title}”? This cannot be undone.`)) return;
+    setSavingId(item.id);
+    setError('');
+    try {
+      await api(`/api/priorities/${item.id}`, { method: 'DELETE' }, csrf);
+      setItems((current) => current.filter((candidate) => candidate.id !== item.id));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Unable to remove the priority.');
+    } finally {
+      setSavingId('');
+    }
+  }
+
+  const active = items.filter((item) => !item.completed);
+  const completed = items.filter((item) => item.completed);
+  const sorted = (values: PriorityItem[]) =>
+    [...values].sort((a, b) => b.priority - a.priority || b.updatedAt.localeCompare(a.updatedAt));
+
+  return (
+    <div className="priorities-page">
+      <section className="panel priority-hero">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Shared focus list</p>
+            <h2>Team priorities</h2>
+            <p className="muted">Keep Alex, Brendon and Suzie aligned on what matters next.</p>
+          </div>
+          <div className="priority-total">
+            <strong>{active.length}</strong>
+            <span>active</span>
+          </div>
+        </div>
+        <form className="priority-form" onSubmit={add}>
+          <label className="priority-task-input">
+            Task
+            <input
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              maxLength={240}
+              required
+              placeholder="What needs to be completed?"
+            />
+          </label>
+          <label>
+            For
+            <select
+              value={assignee}
+              onChange={(event) => setAssignee(event.target.value as PriorityAssignee)}
+            >
+              {PRIORITY_PEOPLE.map((person) => (
+                <option key={person.id} value={person.id}>
+                  {person.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Priority
+            <select value={priority} onChange={(event) => setPriority(Number(event.target.value))}>
+              {Array.from({ length: 10 }, (_, index) => 10 - index).map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                  {value === 10 ? ' — Highest' : value === 1 ? ' — Lowest' : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className="button gold" disabled={savingId === 'new'}>
+            {savingId === 'new' ? 'Adding...' : 'Add priority'}
+          </button>
+        </form>
+        {error && (
+          <div className="message error" role="alert">
+            {error}
+          </div>
+        )}
+      </section>
+
+      {loading ? (
+        <div className="loading">Loading team priorities...</div>
+      ) : (
+        <div className="priority-board">
+          {PRIORITY_PEOPLE.map((person) => {
+            const personItems = sorted(active.filter((item) => item.assignee === person.id));
+            return (
+              <section className="priority-column" key={person.id}>
+                <div className="priority-column-heading">
+                  <div className="person-initial">{person.name[0]}</div>
+                  <div>
+                    <h3>{person.name}</h3>
+                    <span>{personItems.length} active</span>
+                  </div>
+                </div>
+                <div className="priority-list">
+                  {personItems.length ? (
+                    personItems.map((item) => (
+                      <article
+                        className={`priority-card priority-${item.priority >= 8 ? 'high' : item.priority >= 5 ? 'medium' : 'standard'}`}
+                        key={item.id}
+                      >
+                        <div className="priority-card-top">
+                          <span className="priority-score" aria-label={`Priority ${item.priority}`}>
+                            {item.priority}
+                          </span>
+                          <button
+                            className="link-button danger-text"
+                            onClick={() => void remove(item)}
+                            disabled={savingId === item.id}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        <p>{item.title}</p>
+                        <div className="priority-controls">
+                          <label>
+                            For
+                            <select
+                              aria-label={`Assignee for ${item.title}`}
+                              value={item.assignee}
+                              disabled={savingId === item.id}
+                              onChange={(event) =>
+                                void update(item, {
+                                  assignee: event.target.value as PriorityAssignee,
+                                })
+                              }
+                            >
+                              {PRIORITY_PEOPLE.map((candidate) => (
+                                <option key={candidate.id} value={candidate.id}>
+                                  {candidate.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            Priority
+                            <select
+                              aria-label={`Priority for ${item.title}`}
+                              value={item.priority}
+                              disabled={savingId === item.id}
+                              onChange={(event) =>
+                                void update(item, { priority: Number(event.target.value) })
+                              }
+                            >
+                              {Array.from({ length: 10 }, (_, index) => 10 - index).map((value) => (
+                                <option key={value} value={value}>
+                                  {value}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        <label className="complete-control">
+                          <input
+                            type="checkbox"
+                            checked={item.completed}
+                            disabled={savingId === item.id}
+                            onChange={(event) =>
+                              void update(item, { completed: event.target.checked })
+                            }
+                          />
+                          Mark complete
+                        </label>
+                      </article>
+                    ))
+                  ) : (
+                    <div className="empty priority-empty">No active priorities.</div>
+                  )}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      )}
+
+      {!loading && completed.length > 0 && (
+        <section className="panel completed-priorities">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Recently finished</p>
+              <h2>Completed</h2>
+            </div>
+            <span className="total-rule">{completed.length} items</span>
+          </div>
+          <div className="completed-list">
+            {sorted(completed).map((item) => (
+              <article key={item.id}>
+                <label className="complete-control">
+                  <input
+                    type="checkbox"
+                    checked
+                    disabled={savingId === item.id}
+                    onChange={(event) => void update(item, { completed: event.target.checked })}
+                  />
+                  <span>
+                    <strong>{item.title}</strong>
+                    {PRIORITY_PEOPLE.find((person) => person.id === item.assignee)?.name} · Priority{' '}
+                    {item.priority}
+                  </span>
+                </label>
+                <button
+                  className="link-button danger-text"
+                  onClick={() => void remove(item)}
+                  disabled={savingId === item.id}
+                >
+                  Remove
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
 function Reports({ csrf }: { csrf: string }) {
   const [week, setWeek] = useState(todayBrisbane());
   const [busy, setBusy] = useState('');
@@ -1189,8 +1490,8 @@ export default function App() {
     );
   const views: View[] =
     user.role === 'admin'
-      ? ['dashboard', 'history', 'reports', 'practice']
-      : ['dashboard', 'history'];
+      ? ['dashboard', 'history', 'priorities', 'reports', 'practice']
+      : ['dashboard', 'history', 'priorities'];
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -1257,6 +1558,8 @@ export default function App() {
             />
           ) : view === 'reports' ? (
             <Reports csrf={csrf} />
+          ) : view === 'priorities' ? (
+            <Priorities csrf={csrf} />
           ) : (
             <Practice csrf={csrf} />
           ))

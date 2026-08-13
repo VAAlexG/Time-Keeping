@@ -33,6 +33,7 @@ const app = createApp(async (request): Promise<AccessIdentity> => {
 beforeEach(async () => {
   await env.DB.batch([
     env.DB.prepare('DELETE FROM weekly_report_deliveries'),
+    env.DB.prepare('DELETE FROM priority_items'),
     env.DB.prepare('DELETE FROM time_entries'),
     env.DB.prepare('DELETE FROM jobs'),
     env.DB.prepare('DELETE FROM clients'),
@@ -275,6 +276,69 @@ describe('employee timekeeping isolation', () => {
         })
       ).status,
     ).toBe(204);
+  });
+});
+
+describe('shared team priorities', () => {
+  it('allows the team to add, reprioritise, complete, reassign, and remove items', async () => {
+    const alex = await signIn(ALEX);
+    const employee = await signIn(EMPLOYEE);
+    const created = await call('/api/priorities', {
+      method: 'POST',
+      headers: headers(alex),
+      body: JSON.stringify({
+        title: 'Finalise the client onboarding checklist',
+        assignee: 'brendon',
+        priority: 9,
+      }),
+    });
+    expect(created.status).toBe(201);
+    const item = (await created.json()) as {
+      item: { id: string; completed: boolean; createdByName: string };
+    };
+    expect(item.item).toMatchObject({ completed: false, createdByName: 'alexg' });
+
+    const listed = await call('/api/priorities', { headers: headers(employee, false) });
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toMatchObject({
+      items: [{ id: item.item.id, assignee: 'brendon', priority: 9 }],
+    });
+
+    const updated = await call(`/api/priorities/${item.item.id}`, {
+      method: 'PUT',
+      headers: headers(employee),
+      body: JSON.stringify({
+        title: 'Finalise the client onboarding checklist',
+        assignee: 'suzie',
+        priority: 10,
+        completed: true,
+      }),
+    });
+    expect(updated.status).toBe(200);
+    expect(await updated.json()).toMatchObject({
+      item: { assignee: 'suzie', priority: 10, completed: true },
+    });
+
+    const removed = await call(`/api/priorities/${item.item.id}`, {
+      method: 'DELETE',
+      headers: headers(alex, false),
+    });
+    expect(removed.status).toBe(204);
+    expect(await (await call('/api/priorities', { headers: headers(alex, false) })).json()).toEqual(
+      {
+        items: [],
+      },
+    );
+  });
+
+  it('validates assignees and priority range', async () => {
+    const alex = await signIn(ALEX);
+    const response = await call('/api/priorities', {
+      method: 'POST',
+      headers: headers(alex),
+      body: JSON.stringify({ title: 'Invalid item', assignee: 'someone-else', priority: 11 }),
+    });
+    expect(response.status).toBe(400);
   });
 });
 

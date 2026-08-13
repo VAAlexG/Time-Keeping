@@ -6,6 +6,20 @@ export interface Project {
 
 export type UserRole = 'employee' | 'admin';
 export type WorkType = 'client' | 'internal' | 'legacy';
+export type PriorityAssignee = 'alex' | 'brendon' | 'suzie';
+
+export interface PriorityItem {
+  id: string;
+  title: string;
+  assignee: PriorityAssignee;
+  priority: number;
+  completed: boolean;
+  createdByUserId: string;
+  createdByName: string;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface User {
   id: string;
