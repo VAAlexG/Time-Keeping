@@ -37,7 +37,7 @@
     "REPORT_VIEWER_EMAILS": "suzieg@versatileaccounting.com.au",
     "WEEKLY_REPORT_RECIPIENTS": "suzieg@versatileaccounting.com.au,alexg@versatileaccounting.com.au,brendong@versatileaccounting.com.au",
     "FYI_API_BASE_URL": "https://api-ap-southeast-2.fyi.app/external",
-    "XERO_ENABLED": "false",
+    "XERO_ENABLED": "true",
     "XERO_REVIEWER_EMAILS": "suzieg@versatileaccounting.com.au",
     "RUNNING_TIMER_ALERT_HOURS": "12",
     "LONG_ENTRY_ALERT_HOURS": "16",
