@@ -13,6 +13,9 @@ export default defineConfig(async () => {
     ],
     test: {
       setupFiles: ['./tests/apply-migrations.ts'],
+      // Workerd startup plus D1 migrations, PDF/font rendering and XLSX
+      // generation can exceed Vitest's 5s default on a cold Windows/CI host.
+      testTimeout: 15_000,
     },
   };
 });

@@ -3,6 +3,7 @@ import type { PriorityAssignee, PriorityItem } from './types';
 interface PriorityRow {
   id: string;
   title: string;
+  description: string;
   assignee: PriorityAssignee;
   priority: number;
   completed: number;
@@ -13,7 +14,7 @@ interface PriorityRow {
   updated_at: number;
 }
 
-const SELECT = `SELECT p.id, p.title, p.assignee, p.priority, p.completed,
+const SELECT = `SELECT p.id, p.title, p.description, p.assignee, p.priority, p.completed,
   p.created_by_user_id, u.display_name AS created_by_name, p.completed_at,
   p.created_at, p.updated_at
   FROM priority_items p JOIN users u ON u.id = p.created_by_user_id`;
@@ -22,6 +23,7 @@ const iso = (value: number) => new Date(value).toISOString();
 const fromRow = (row: PriorityRow): PriorityItem => ({
   id: row.id,
   title: row.title,
+  description: row.description,
   assignee: row.assignee,
   priority: row.priority,
   completed: Boolean(row.completed),
@@ -49,6 +51,7 @@ export class D1PriorityStore {
 
   async create(input: {
     title: string;
+    description: string;
     assignee: PriorityAssignee;
     priority: number;
     createdByUserId: string;
@@ -57,13 +60,14 @@ export class D1PriorityStore {
     const timestamp = this.now().getTime();
     await this.db
       .prepare(
-        `INSERT INTO priority_items (id, title, assignee, priority, completed,
+        `INSERT INTO priority_items (id, title, description, assignee, priority, completed,
         created_by_user_id, completed_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 0, ?, NULL, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, 0, ?, NULL, ?, ?)`,
       )
       .bind(
         id,
         input.title.trim(),
+        input.description.trim(),
         input.assignee,
         input.priority,
         input.createdByUserId,
@@ -78,6 +82,7 @@ export class D1PriorityStore {
     id: string,
     input: {
       title: string;
+      description: string;
       assignee: PriorityAssignee;
       priority: number;
       completed: boolean;
@@ -93,11 +98,12 @@ export class D1PriorityStore {
       : null;
     await this.db
       .prepare(
-        `UPDATE priority_items SET title = ?, assignee = ?, priority = ?, completed = ?,
+        `UPDATE priority_items SET title = ?, description = ?, assignee = ?, priority = ?, completed = ?,
         completed_at = ?, updated_at = ? WHERE id = ?`,
       )
       .bind(
         input.title.trim(),
+        input.description.trim(),
         input.assignee,
         input.priority,
         Number(input.completed),

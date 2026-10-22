@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { getWeekRange, overlapMs, splitEntryByBrisbaneDay } from '../server/time';
+import {
+  fridayCloseRange,
+  fridayCutoffsBetween,
+  getWeekRange,
+  latestFridayCutoff,
+  overlapMs,
+  splitEntryByBrisbaneDay,
+} from '../server/time';
 import type { TimeEntry } from '../server/types';
 
 const entry = (startAt: string, endAt: string): TimeEntry => ({
@@ -23,8 +30,18 @@ const entry = (startAt: string, endAt: string): TimeEntry => ({
   billable: false,
   legacy: true,
   notes: '',
+  clientDescription: '',
+  internalNote: '',
   startAt,
   endAt,
+  revision: 1,
+  lockedAt: null,
+  closePeriodId: null,
+  segmentRootId: '1',
+  segmentParentId: null,
+  segmentIndex: 0,
+  originalStartAt: startAt,
+  originalEndAt: endAt,
   createdAt: startAt,
   updatedAt: endAt,
 });
@@ -36,6 +53,26 @@ describe('Brisbane time calculations', () => {
     expect(range.weekEnd).toBe('2026-08-09');
     expect(range.from.toISOString()).toBe('2026-08-02T14:00:00.000Z');
     expect(range.to.toISOString()).toBe('2026-08-09T14:00:00.000Z');
+  });
+
+  it('uses the exact Friday 20:00 Brisbane close boundary', () => {
+    expect(latestFridayCutoff(new Date('2026-08-07T09:59:59.999Z')).toISOString()).toBe(
+      '2026-07-31T10:00:00.000Z',
+    );
+    const atCutoff = latestFridayCutoff(new Date('2026-08-07T10:00:00.000Z'));
+    expect(atCutoff.toISOString()).toBe('2026-08-07T10:00:00.000Z');
+    const range = fridayCloseRange(atCutoff);
+    expect(range.from.toISOString()).toBe('2026-07-31T10:00:00.000Z');
+    expect(range.to.toISOString()).toBe('2026-08-07T10:00:00.000Z');
+  });
+
+  it('finds every strict close boundary during missed-period recovery', () => {
+    expect(
+      fridayCutoffsBetween(
+        new Date('2026-07-30T00:00:00.000Z'),
+        new Date('2026-08-15T00:00:00.000Z'),
+      ).map((value) => value.toISOString()),
+    ).toEqual(['2026-07-31T10:00:00.000Z', '2026-08-07T10:00:00.000Z', '2026-08-14T10:00:00.000Z']);
   });
 
   it('allocates an entry crossing Brisbane midnight to both dates', () => {

@@ -194,8 +194,12 @@ export class MemoryTimeStore implements TimeStore {
       .sort((a, b) => Date.parse(b.startAt) - Date.parse(a.startAt));
   }
 
-  async claimDelivery(weekStart: string, type: DeliveryType): Promise<DeliveryClaim> {
-    const key = `${weekStart}:${type}`;
+  async claimDelivery(
+    weekStart: string,
+    deliveryDate: string,
+    type: DeliveryType,
+  ): Promise<DeliveryClaim> {
+    const key = `${weekStart}:${deliveryDate}:${type}`;
     const existing = this.deliveries.get(key);
     if (existing?.status === 'sent') return { shouldSend: false, reason: 'already-sent' };
     if (existing?.status === 'sending') return { shouldSend: false, reason: 'already-sending' };
@@ -203,12 +207,20 @@ export class MemoryTimeStore implements TimeStore {
     return { shouldSend: true };
   }
 
-  async markDeliverySent(weekStart: string, type: DeliveryType): Promise<void> {
-    this.deliveries.get(`${weekStart}:${type}`)!.status = 'sent';
+  async markDeliverySent(
+    weekStart: string,
+    deliveryDate: string,
+    type: DeliveryType,
+  ): Promise<void> {
+    this.deliveries.get(`${weekStart}:${deliveryDate}:${type}`)!.status = 'sent';
   }
 
-  async markDeliveryFailed(weekStart: string, type: DeliveryType): Promise<void> {
-    this.deliveries.get(`${weekStart}:${type}`)!.status = 'failed';
+  async markDeliveryFailed(
+    weekStart: string,
+    deliveryDate: string,
+    type: DeliveryType,
+  ): Promise<void> {
+    this.deliveries.get(`${weekStart}:${deliveryDate}:${type}`)!.status = 'failed';
   }
 
   private makeEntry(
@@ -221,8 +233,9 @@ export class MemoryTimeStore implements TimeStore {
     const user = this.users.find((candidate) => candidate.id === userId);
     if (!user) throw new Error('Unknown test user');
     const now = new Date().toISOString();
+    const id = randomUUID();
     return {
-      id: randomUUID(),
+      id,
       userId,
       userEmail: user.email,
       userDisplayName: user.displayName,
@@ -242,8 +255,18 @@ export class MemoryTimeStore implements TimeStore {
       billable: false,
       legacy: true,
       notes,
+      clientDescription: '',
+      internalNote: notes,
       startAt: startAt.toISOString(),
       endAt: endAt?.toISOString() ?? null,
+      revision: 1,
+      lockedAt: null,
+      closePeriodId: null,
+      segmentRootId: id,
+      segmentParentId: null,
+      segmentIndex: 0,
+      originalStartAt: startAt.toISOString(),
+      originalEndAt: endAt?.toISOString() ?? null,
       createdAt: now,
       updatedAt: now,
     };

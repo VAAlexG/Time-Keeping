@@ -34,6 +34,42 @@ describe('weekly Excel report', () => {
       store,
       '2026-08-03',
       new Date('2026-08-10T00:00:00.000Z'),
+      [
+        {
+          id: 'priority-1',
+          title: 'Finalise quarterly accounts',
+          description: 'Review the workpapers and prepare the partner sign-off pack.',
+          assignee: 'suzie',
+          priority: 9,
+          completed: false,
+          createdByUserId: alex.id,
+          createdByName: 'Alex',
+          completedAt: null,
+          createdAt: '2026-08-03T00:00:00.000Z',
+          updatedAt: '2026-08-04T00:00:00.000Z',
+        },
+      ],
+      [
+        {
+          id: 'occurrence-1',
+          templateId: 'template-1',
+          dueDate: '2026-08-04',
+          dueAt: '2026-08-04T05:00:00.000Z',
+          dueTime: '15:00',
+          title: 'WAM Meats payroll',
+          description: 'Lodge STP and submit super',
+          assignee: 'suzie',
+          recurrenceLabel: 'Weekly',
+          completed: true,
+          cancelled: false,
+          overdue: false,
+          completedByUserId: alex.id,
+          completedByName: 'Alex',
+          completedAt: '2026-08-04T04:00:00.000Z',
+          createdAt: '2026-08-01T00:00:00.000Z',
+          updatedAt: '2026-08-04T04:00:00.000Z',
+        },
+      ],
     );
     expect(report.filename).toBe('time-report-2026-08-03-to-2026-08-09.xlsx');
     expect(report.totalMs).toBe(3 * 60 * 60_000);
@@ -55,5 +91,16 @@ describe('weekly Excel report', () => {
     expect(sheet.getColumn(2).values.map(String)).toContain(
       'Brendon (brendong@versatileaccounting.com.au)',
     );
+    const priorities = workbook.getWorksheet('Team priorities')!;
+    expect(priorities.getCell('A1').value).toBe('VERSATILE ACCOUNTING - TEAM PRIORITIES');
+    expect(priorities.getColumn(2).values.map(String)).toContain('Suzie');
+    expect(priorities.getColumn(4).values.map(String)).toContain('Finalise quarterly accounts');
+    expect(priorities.getColumn(5).values.map(String)).toContain(
+      'Review the workpapers and prepare the partner sign-off pack.',
+    );
+    const schedule = workbook.getWorksheet('Recurring Schedule')!;
+    expect(schedule.getCell('A1').value).toBe('VERSATILE ACCOUNTING - RECURRING SCHEDULE');
+    expect(schedule.getColumn(5).values.map(String)).toContain('WAM Meats payroll');
+    expect(schedule.getColumn(6).values.map(String)).toContain('Lodge STP and submit super');
   });
 });

@@ -10,6 +10,29 @@ export interface FyiConfig {
 
 type JsonRecord = Record<string, unknown>;
 
+function fyiResourceUrl(baseUrl: string, resource: 'entity' | 'job'): string {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error('FYI_API_BASE_URL must be a valid HTTPS FYI API URL.');
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    url.port ||
+    url.search ||
+    url.hash ||
+    !(hostname === 'fyi.app' || hostname.endsWith('.fyi.app'))
+  ) {
+    throw new Error('FYI_API_BASE_URL must be an HTTPS endpoint hosted by fyi.app.');
+  }
+  url.pathname = `${url.pathname.replace(/\/$/, '')}/${resource}`;
+  return url.toString();
+}
+
 function text(value: unknown): string | null {
   if (typeof value === 'string' && value.trim()) return value.trim();
   if (typeof value === 'number') return String(value);
@@ -43,8 +66,9 @@ async function fyiList(config: FyiConfig, resource: 'entity' | 'job'): Promise<J
       'x-fyi-access-secret': config.accessSecret,
     });
     if (config.applicationId) headers.set('x-fyi-application-id', config.applicationId);
-    const response = await fetch(`${config.baseUrl.replace(/\/$/, '')}/${resource}`, {
+    const response = await fetch(fyiResourceUrl(config.baseUrl, resource), {
       method: 'POST',
+      redirect: 'error',
       headers,
       body: JSON.stringify({
         page,

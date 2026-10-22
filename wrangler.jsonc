@@ -4,6 +4,13 @@
   "main": "worker/index.ts",
   "compatibility_date": "2026-08-08",
   "compatibility_flags": ["nodejs_compat"],
+  "rules": [
+    {
+      "type": "Data",
+      "globs": ["**/*.woff"],
+      "fallthrough": true,
+    },
+  ],
   "assets": {
     "directory": "./dist/client",
     "binding": "ASSETS",
@@ -19,7 +26,7 @@
     },
   ],
   "triggers": {
-    "crons": ["5 14 * * SUN", "15 16 * * *"],
+    "crons": ["0 10 * * FRI", "5 14 * * SUN", "5 14 * * *", "15 16 * * *", "*/10 * * * *"],
   },
   "observability": {
     "enabled": true,
@@ -27,18 +34,12 @@
   "vars": {
     "ALLOWED_EMAIL_DOMAIN": "versatileaccounting.com.au",
     "ADMIN_EMAILS": "alexg@versatileaccounting.com.au,brendong@versatileaccounting.com.au",
+    "REPORT_VIEWER_EMAILS": "suzieg@versatileaccounting.com.au",
+    "WEEKLY_REPORT_RECIPIENTS": "suzieg@versatileaccounting.com.au,alexg@versatileaccounting.com.au,brendong@versatileaccounting.com.au",
     "FYI_API_BASE_URL": "https://api-ap-southeast-2.fyi.app/external",
+    "XERO_ENABLED": "true",
+    "XERO_REVIEWER_EMAILS": "suzieg@versatileaccounting.com.au",
     "RUNNING_TIMER_ALERT_HOURS": "12",
     "LONG_ENTRY_ALERT_HOURS": "16",
-  },
-  "secrets": {
-    "required": [
-      "ACCESS_TEAM_DOMAIN",
-      "ACCESS_AUD",
-      "RESEND_API_KEY",
-      "EMAIL_FROM",
-      "WEEKLY_REPORT_RECIPIENT",
-      "REPORT_TEST_RECIPIENT",
-    ],
   },
 }

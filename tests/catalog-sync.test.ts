@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
-import { beforeEach, describe, expect, it } from 'vitest';
-import { importCatalogCsv } from '../server/catalog-sync';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { importCatalogCsv, syncFromFyi } from '../server/catalog-sync';
 import { D1TimeStore } from '../server/d1-store';
 
 const csv = `client_external_id,client_name,client_code,export_code,client_active,job_external_id,job_name,job_code,job_status,job_active
@@ -58,5 +58,41 @@ describe('practice catalogue import', () => {
     await expect(importCatalogCsv(new D1TimeStore(env.DB), partialJob)).rejects.toThrow(
       'must include both a job external ID and job name',
     );
+  });
+
+  it('rejects non-FYI endpoints and refuses redirects for credential-bearing requests', async () => {
+    const store = new D1TimeStore(env.DB);
+    const request = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ data: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    );
+    await syncFromFyi(
+      store,
+      {
+        baseUrl: 'https://api-ap-southeast-2.fyi.app/external',
+        accessId: 'access-id',
+        accessSecret: 'access-secret',
+      },
+      'manual',
+    );
+    expect(request).toHaveBeenCalledTimes(2);
+    for (const [, init] of request.mock.calls) expect(init?.redirect).toBe('error');
+    request.mockClear();
+    await expect(
+      syncFromFyi(
+        store,
+        {
+          baseUrl: 'https://attacker.example/external',
+          accessId: 'access-id',
+          accessSecret: 'access-secret',
+        },
+        'manual',
+      ),
+    ).rejects.toThrow('hosted by fyi.app');
+    expect(request).not.toHaveBeenCalled();
+    request.mockRestore();
   });
 });
