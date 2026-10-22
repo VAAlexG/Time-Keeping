@@ -14,6 +14,7 @@ import type {
   UserRole,
   WorkClassificationInput,
 } from './types';
+import { latestFridayCutoff } from './time';
 
 interface ProjectRow {
   id: string;
@@ -34,7 +35,7 @@ interface UserRow {
 interface ClientRow {
   id: string;
   external_id: string;
-  source: 'fyi' | 'csv';
+  source: 'fyi' | 'xero' | 'csv';
   name: string;
   client_code: string | null;
   export_code: string | null;
@@ -47,7 +48,7 @@ interface JobRow {
   id: string;
   external_id: string;
   client_id: string;
-  source: 'fyi' | 'csv';
+  source: 'fyi' | 'xero' | 'csv';
   name: string;
   job_code: string | null;
   status: string | null;
@@ -81,14 +82,30 @@ interface EntryRow {
   legacy_project_name_snapshot: string | null;
   billable: number;
   notes: string;
+  client_description: string;
+  xero_project_id: string | null;
+  xero_project_name: string | null;
+  xero_task_id: string | null;
+  xero_task_name: string | null;
+  xero_charge_type: 'TIME' | 'FIXED' | 'NON_CHARGEABLE' | null;
+  xero_rate: number | null;
+  xero_currency_code: string | null;
   start_at: number;
   end_at: number | null;
+  revision: number;
+  locked_at: number | null;
+  close_period_id: string | null;
+  segment_root_id: string | null;
+  segment_parent_id: string | null;
+  segment_index: number;
+  original_start_at: number | null;
+  original_end_at: number | null;
   created_at: number;
   updated_at: number;
 }
 interface SyncRunRow {
   id: string;
-  source: 'fyi' | 'csv';
+  source: 'fyi' | 'xero' | 'csv';
   trigger_type: 'scheduled' | 'manual' | 'import';
   status: 'running' | 'succeeded' | 'failed';
   clients_created: number;
@@ -131,8 +148,18 @@ const ENTRY_SELECT = `SELECT e.id, e.user_id, u.email AS user_email, u.display_n
   e.client_external_id_snapshot, e.client_code_snapshot, e.job_id, e.job_name_snapshot,
   e.job_external_id_snapshot, e.job_code_snapshot, e.internal_activity_id,
   e.activity_name_snapshot, e.legacy_project_name_snapshot, e.billable, e.notes,
-  e.start_at, e.end_at, e.created_at, e.updated_at
-  FROM time_entries e JOIN projects p ON p.id = e.project_id JOIN users u ON u.id = e.user_id`;
+  e.client_description, e.start_at, e.end_at, e.revision, e.locked_at,
+  e.close_period_id, e.segment_root_id, e.segment_parent_id, e.segment_index,
+  e.original_start_at, e.original_end_at, e.created_at, e.updated_at,
+  xs.project_id AS xero_project_id, xs.project_name_snapshot AS xero_project_name,
+  xs.task_id AS xero_task_id, xs.task_name_snapshot AS xero_task_name,
+  xs.task_charge_type_snapshot AS xero_charge_type,
+  xs.task_rate_value_snapshot AS xero_rate,
+  xs.task_rate_currency_snapshot AS xero_currency_code
+  FROM time_entries e
+  JOIN projects p ON p.id = e.project_id
+  JOIN users u ON u.id = e.user_id
+  LEFT JOIN xero_projects_entry_selections xs ON xs.entry_id = e.id`;
 const SYNC_SELECT = `SELECT id, source, trigger_type, status, clients_created, clients_updated,
   clients_archived, jobs_created, jobs_updated, jobs_archived, error_message, started_at, completed_at
   FROM sync_runs`;
@@ -204,8 +231,26 @@ const entryFromRow = (row: EntryRow): TimeEntry => ({
   billable: Boolean(row.billable),
   legacy: row.work_type === 'legacy',
   notes: row.notes,
+  clientDescription: row.client_description,
+  internalNote: row.notes,
+  xeroProjectId: row.xero_project_id,
+  xeroProjectName: row.xero_project_name,
+  xeroTaskId: row.xero_task_id,
+  xeroTaskName: row.xero_task_name,
+  xeroChargeType: row.xero_charge_type,
+  xeroRate: row.xero_rate,
+  xeroCurrencyCode: row.xero_currency_code,
   startAt: iso(row.start_at),
   endAt: row.end_at === null ? null : iso(row.end_at),
+  revision: row.revision,
+  lockedAt: row.locked_at === null ? null : iso(row.locked_at),
+  closePeriodId: row.close_period_id,
+  segmentRootId: row.segment_root_id ?? row.id,
+  segmentParentId: row.segment_parent_id,
+  segmentIndex: row.segment_index,
+  originalStartAt: iso(row.original_start_at ?? row.start_at),
+  originalEndAt:
+    (row.original_end_at ?? row.end_at) === null ? null : iso((row.original_end_at ?? row.end_at)!),
   createdAt: iso(row.created_at),
   updatedAt: iso(row.updated_at),
 });
@@ -246,6 +291,22 @@ export class D1TimeStore implements TimeStore {
     private readonly db: D1Database,
     private readonly now: () => Date = () => new Date(),
   ) {}
+
+  private async effectiveLockCutoff(at = this.now()): Promise<number> {
+    const control = await this.db
+      .prepare(
+        `SELECT activated_at, closed_through,
+                COALESCE((
+                  SELECT MAX(cutoff_at) FROM close_periods
+                  WHERE status IN ('closing', 'closed', 'report_failed')
+                ), 0) AS period_cutoff
+         FROM close_control WHERE id = 1`,
+      )
+      .first<{ activated_at: number | null; closed_through: number; period_cutoff: number }>();
+    const periodCutoff = control?.period_cutoff || Number.NEGATIVE_INFINITY;
+    if (!control?.activated_at) return periodCutoff;
+    return Math.max(periodCutoff, control.closed_through, latestFridayCutoff(at).getTime());
+  }
 
   async upsertUser(input: {
     accessSubject: string;
@@ -523,10 +584,12 @@ export class D1TimeStore implements TimeStore {
   private async insertEntry(
     userId: string,
     classification: WorkClassificationInput,
-    notes: string,
+    internalNote: string,
     startAt: Date,
     endAt: Date | null,
+    clientDescription = '',
   ): Promise<TimeEntry> {
+    if (startAt.getTime() < (await this.effectiveLockCutoff())) throw new Error('LOCKED_PERIOD');
     const resolved = await this.resolveClassification(classification);
     const project = await this.getOrCreateProject(resolved.projectName);
     const id = crypto.randomUUID();
@@ -534,17 +597,19 @@ export class D1TimeStore implements TimeStore {
     try {
       await this.db
         .prepare(
-          `INSERT INTO time_entries (id, user_id, project_id, notes, start_at, end_at,
+          `INSERT INTO time_entries (id, user_id, project_id, notes, client_description, start_at, end_at,
         active_guard, created_at, updated_at, work_type, client_id, job_id, internal_activity_id, billable,
         client_name_snapshot, client_external_id_snapshot, client_code_snapshot, job_name_snapshot,
-        job_external_id_snapshot, job_code_snapshot, activity_name_snapshot, legacy_project_name_snapshot)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        job_external_id_snapshot, job_code_snapshot, activity_name_snapshot, legacy_project_name_snapshot,
+        segment_root_id, segment_parent_id, segment_index, original_start_at, original_end_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, 0, ?, ?)`,
         )
         .bind(
           id,
           userId,
           project.id,
-          notes.trim(),
+          internalNote.trim(),
+          clientDescription.trim(),
           startAt.getTime(),
           endAt?.getTime() ?? null,
           endAt ? null : 1,
@@ -562,6 +627,9 @@ export class D1TimeStore implements TimeStore {
           resolved.jobExternalId,
           resolved.jobCode,
           resolved.activityName,
+          id,
+          startAt.getTime(),
+          endAt?.getTime() ?? null,
         )
         .run();
     } catch (error) {
@@ -573,46 +641,86 @@ export class D1TimeStore implements TimeStore {
   async clockIn(
     userId: string,
     classification: WorkClassificationInput,
-    notes: string,
+    internalNote: string,
     now: Date,
+    clientDescription = '',
   ): Promise<TimeEntry> {
-    return this.insertEntry(userId, classification, notes, now, null);
+    return this.insertEntry(userId, classification, internalNote, now, null, clientDescription);
   }
   async clockOut(userId: string, now: Date): Promise<TimeEntry | null> {
     const active = await this.getActiveEntry(userId);
     if (!active || now <= new Date(active.startAt)) return null;
+    if (Date.parse(active.startAt) < (await this.effectiveLockCutoff(now)))
+      throw new Error('LOCK_BOUNDARY_SPLIT_REQUIRED');
     const result = await this.db
       .prepare(
-        'UPDATE time_entries SET end_at = ?, active_guard = NULL, updated_at = ? WHERE id = ? AND user_id = ? AND end_at IS NULL',
+        `UPDATE time_entries SET end_at = ?, active_guard = NULL, original_end_at = ?,
+         revision = revision + 1, updated_at = ?
+         WHERE id = ? AND user_id = ? AND end_at IS NULL AND locked_at IS NULL`,
       )
-      .bind(now.getTime(), now.getTime(), active.id, userId)
+      .bind(now.getTime(), now.getTime(), now.getTime(), active.id, userId)
       .run();
     return result.meta.changes ? this.getEntry(active.id, userId) : null;
   }
   async createEntry(
     userId: string,
-    input: WorkClassificationInput & { notes: string; startAt: Date; endAt: Date },
+    input: WorkClassificationInput & {
+      notes: string;
+      internalNote?: string;
+      clientDescription?: string;
+      startAt: Date;
+      endAt: Date;
+    },
   ): Promise<TimeEntry> {
-    return this.insertEntry(userId, input, input.notes, input.startAt, input.endAt);
+    return this.insertEntry(
+      userId,
+      input,
+      input.internalNote ?? input.notes ?? '',
+      input.startAt,
+      input.endAt,
+      input.clientDescription ?? '',
+    );
   }
   async updateEntry(
     userId: string,
     id: string,
-    input: WorkClassificationInput & { notes: string; startAt: Date; endAt: Date },
+    input: WorkClassificationInput & {
+      notes: string;
+      internalNote?: string;
+      clientDescription?: string;
+      startAt: Date;
+      endAt: Date;
+      expectedRevision?: number;
+    },
   ): Promise<TimeEntry | null> {
+    const existing = await this.getEntry(id, userId);
+    if (!existing || !existing.endAt) return null;
+    const cutoff = await this.effectiveLockCutoff();
+    if (
+      existing.lockedAt ||
+      Date.parse(existing.startAt) < cutoff ||
+      input.startAt.getTime() < cutoff
+    )
+      throw new Error('LOCKED_ENTRY');
     const resolved = await this.resolveClassification(input);
     const project = await this.getOrCreateProject(resolved.projectName);
     const result = await this.db
       .prepare(
-        `UPDATE time_entries SET project_id = ?, notes = ?, start_at = ?, end_at = ?,
+        `UPDATE time_entries SET project_id = ?, notes = ?, client_description = ?, start_at = ?, end_at = ?,
+      original_start_at = ?, original_end_at = ?, revision = revision + 1,
       updated_at = ?, work_type = ?, client_id = ?, job_id = ?, internal_activity_id = ?, billable = ?,
       client_name_snapshot = ?, client_external_id_snapshot = ?, client_code_snapshot = ?, job_name_snapshot = ?,
-      job_external_id_snapshot = ?, job_code_snapshot = ?, activity_name_snapshot = ?, legacy_project_name_snapshot = NULL
-      WHERE id = ? AND user_id = ? AND end_at IS NOT NULL`,
+      job_external_id_snapshot = ?, job_code_snapshot = ?, activity_name_snapshot = ?, legacy_project_name_snapshot = NULL,
+      xero_selection_epoch = xero_selection_epoch + 1
+      WHERE id = ? AND user_id = ? AND end_at IS NOT NULL AND locked_at IS NULL
+        AND (? IS NULL OR revision = ?)`,
       )
       .bind(
         project.id,
-        input.notes.trim(),
+        (input.internalNote ?? input.notes ?? '').trim(),
+        (input.clientDescription ?? '').trim(),
+        input.startAt.getTime(),
+        input.endAt.getTime(),
         input.startAt.getTime(),
         input.endAt.getTime(),
         this.now().getTime(),
@@ -630,13 +738,19 @@ export class D1TimeStore implements TimeStore {
         resolved.activityName,
         id,
         userId,
+        input.expectedRevision ?? null,
+        input.expectedRevision ?? null,
       )
       .run();
     return result.meta.changes ? this.getEntry(id, userId) : null;
   }
   async deleteEntry(userId: string, id: string): Promise<boolean> {
+    const existing = await this.getEntry(id, userId);
+    if (!existing) return false;
+    if (existing.lockedAt || Date.parse(existing.startAt) < (await this.effectiveLockCutoff()))
+      throw new Error('LOCKED_ENTRY');
     const result = await this.db
-      .prepare('DELETE FROM time_entries WHERE id = ? AND user_id = ?')
+      .prepare('DELETE FROM time_entries WHERE id = ? AND user_id = ? AND locked_at IS NULL')
       .bind(id, userId)
       .run();
     return Boolean(result.meta.changes);
@@ -668,7 +782,7 @@ export class D1TimeStore implements TimeStore {
   }
 
   async beginSync(
-    source: 'fyi' | 'csv',
+    source: 'fyi' | 'xero' | 'csv',
     triggerType: 'scheduled' | 'manual' | 'import',
   ): Promise<string> {
     const id = crypto.randomUUID();
@@ -713,7 +827,7 @@ export class D1TimeStore implements TimeStore {
     return row ? syncFromRow(row) : null;
   }
   async syncCatalog(
-    source: 'fyi' | 'csv',
+    source: 'fyi' | 'xero' | 'csv',
     clients: CatalogClientInput[],
     jobs: CatalogJobInput[],
     markMissingInactive: boolean,
@@ -866,6 +980,7 @@ export class D1TimeStore implements TimeStore {
 
   async claimDelivery(
     weekStart: string,
+    deliveryDate: string,
     type: DeliveryType,
     recipient: string,
   ): Promise<DeliveryClaim> {
@@ -873,26 +988,28 @@ export class D1TimeStore implements TimeStore {
     const inserted = await this.db
       .prepare(
         `INSERT OR IGNORE INTO weekly_report_deliveries
-      (id, week_start, delivery_type, status, recipient, attempts, created_at, updated_at)
-      VALUES (?, ?, ?, 'sending', ?, 1, ?, ?)`,
+      (id, week_start, delivery_date, delivery_type, status, recipient, attempts, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'sending', ?, 1, ?, ?)`,
       )
-      .bind(crypto.randomUUID(), weekStart, type, recipient, timestamp, timestamp)
+      .bind(crypto.randomUUID(), weekStart, deliveryDate, type, recipient, timestamp, timestamp)
       .run();
     if (inserted.meta.changes) return { shouldSend: true };
     const existing = await this.db
       .prepare(
-        'SELECT status FROM weekly_report_deliveries WHERE week_start = ? AND delivery_type = ?',
+        `SELECT status FROM weekly_report_deliveries
+         WHERE week_start = ? AND delivery_date = ? AND delivery_type = ?`,
       )
-      .bind(weekStart, type)
+      .bind(weekStart, deliveryDate, type)
       .first<{ status: 'sending' | 'sent' | 'failed' }>();
     if (existing?.status === 'sent') return { shouldSend: false, reason: 'already-sent' };
     const reclaimed = await this.db
       .prepare(
         `UPDATE weekly_report_deliveries SET status = 'sending', recipient = ?,
-      attempts = attempts + 1, error_message = NULL, updated_at = ? WHERE week_start = ? AND delivery_type = ?
+      attempts = attempts + 1, error_message = NULL, updated_at = ?
+      WHERE week_start = ? AND delivery_date = ? AND delivery_type = ?
       AND (status = 'failed' OR (status = 'sending' AND updated_at < ?))`,
       )
-      .bind(recipient, timestamp, weekStart, type, timestamp - 15 * 60_000)
+      .bind(recipient, timestamp, weekStart, deliveryDate, type, timestamp - 15 * 60_000)
       .run();
     return reclaimed.meta.changes
       ? { shouldSend: true }
@@ -900,6 +1017,7 @@ export class D1TimeStore implements TimeStore {
   }
   async markDeliverySent(
     weekStart: string,
+    deliveryDate: string,
     type: DeliveryType,
     sentAt: Date,
     providerMessageId?: string,
@@ -907,18 +1025,30 @@ export class D1TimeStore implements TimeStore {
     await this.db
       .prepare(
         `UPDATE weekly_report_deliveries SET status = 'sent', sent_at = ?, provider_message_id = ?,
-      updated_at = ? WHERE week_start = ? AND delivery_type = ?`,
+      updated_at = ? WHERE week_start = ? AND delivery_date = ? AND delivery_type = ?`,
       )
-      .bind(sentAt.getTime(), providerMessageId ?? null, sentAt.getTime(), weekStart, type)
+      .bind(
+        sentAt.getTime(),
+        providerMessageId ?? null,
+        sentAt.getTime(),
+        weekStart,
+        deliveryDate,
+        type,
+      )
       .run();
   }
-  async markDeliveryFailed(weekStart: string, type: DeliveryType, error: string): Promise<void> {
+  async markDeliveryFailed(
+    weekStart: string,
+    deliveryDate: string,
+    type: DeliveryType,
+    error: string,
+  ): Promise<void> {
     await this.db
       .prepare(
         `UPDATE weekly_report_deliveries SET status = 'failed', error_message = ?, updated_at = ?
-      WHERE week_start = ? AND delivery_type = ?`,
+      WHERE week_start = ? AND delivery_date = ? AND delivery_type = ?`,
       )
-      .bind(error.slice(0, 1000), this.now().getTime(), weekStart, type)
+      .bind(error.slice(0, 1000), this.now().getTime(), weekStart, deliveryDate, type)
       .run();
   }
   private async getEntry(id: string, userId?: string): Promise<TimeEntry | null> {

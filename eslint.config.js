@@ -11,6 +11,7 @@ export default tseslint.config(
       'dist-server',
       '.wrangler',
       '.wrangler-dist',
+      '.codex-tmp',
       'worker-configuration.d.ts',
       'coverage',
       'node_modules',

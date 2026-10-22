@@ -1,26 +1,24 @@
-# Xero Projects implementation: first connector commit
+# Xero Projects implementation status
 
-User approval: Projects-first timekeeping and billing workflow. Direct draft invoices are not selected for implementation.
+Timekeeper now contains the integrated, Projects-first reviewed-time workflow. Direct draft-invoice creation is intentionally outside scope.
 
-This branch begins the implementation with real server-side connector modules: contracts, AES-GCM token encryption, OAuth with PKCE and actor-bound single-use state, explicit organisation confirmation, rotating refresh tokens, bounded/allow-listed API requests, rate-limit handling, and verified client/staff catalogue mappings.
+## Implemented in this repository
 
-The existing Worker entrypoint, live schedules and main branch are unchanged. These modules are deliberately not wired into production yet. No Xero, Cloudflare or email credentials have been added and no real records have been uploaded.
+- Friday 20:00 Brisbane locking, boundary splitting, immutable report versions and durable per-recipient report delivery.
+- Server-side confidential-client Xero OAuth with actor-bound single-use state, rotating encrypted tokens and exact organisation confirmation. PKCE is intentionally not added because Xero's documented web-app flow authenticates the token exchange with the client secret.
+- A complete, tenant-bound cache of Xero contacts, projects, tasks and users with explicit FYI-client, FYI-job and employee mappings.
+- Entry-level Xero project/task snapshots, including support for client time without an FYI job.
+- Reviewer preview and approval of an immutable payload hash before a durable upload item is created.
+- Conservative upload retry, ambiguous-write quarantine, source-drift handling and read-only Xero Projects status refresh.
+- Worker API routes and React screens for time entry, Xero setup/mapping, billing review and closed-report downloads.
+- Forward-only D1 migrations `0010_friday_close_and_reports.sql` and `0011_xero_projects_workflow.sql`.
 
-## Companion pilot source package
+FYI remains the read-only source of truth for clients and jobs. Xero Projects is only the downstream destination for approved client time. Existing projects and tasks are reused; Timekeeper does not create projects, change task rates, create invoices or infer payment.
 
-The broader development implementation was delivered in this ChatGPT conversation as `Timekeeper-Projects-Implementation.zip`. It contains the complete combined overlay, a patch against main at `1a00dc348d4d3fcaae92a469714014a4bf549007`, an incremental patch against the original Friday-close package, the new entry/review/setup form, database migrations 0005/0006, protected time/approval/upload services, Friday integration, and billing-status polling.
+## Release boundary
 
-That package is a working source overlay, not a complete repository or a production release. Its remaining modules have not yet been committed in this first connector-only PR. Apply and review the companion package in the full development workspace to continue this branch; preserve unrelated changes and do not apply both patches. On this feature branch, use the overlay after reconciling files already committed, rather than blindly applying the baseline patch.
+Repository implementation is not evidence of a production release. A merge, Worker deployment, remote migration, Friday-close activation, report send, Xero connection, catalogue refresh against a live tenant, approval, unpause or upload must each follow its own recorded authorisation.
 
-33 focused local tests passed for the combined source using SQLite with a D1-shaped transactional adapter and synthetic Xero responses. Backend modules passed a standalone strict TypeScript check. Browser JavaScript passed syntax checking. These are NOT full Cloudflare/workerd, existing-regression, browser, live OAuth, real upload or actual email-delivery tests. Full dependency installation/build was unavailable in the current execution environment; a browser rendering attempt was blocked by environment policy. The included repository-native security tests still need the normal Vitest/workerd run.
+Before any live action, complete the [release checklist](./xero-projects-release-checklist.md) and follow the [production runbook](./xero-projects-runbook.md). Keep `XERO_ENABLED=false`, keep processing paused and use a separate staging Worker/D1 database, safe report mailbox and Xero Demo Company until the staging gates are complete.
 
-## Required next gates
-
-- Integrate the full combined overlay, including Friday-close prerequisites, in this feature workspace.
-- Run formatting, lint, full TypeScript checking, all tests and Worker dry-run build; address failures before any merge/deploy.
-- Stage with a separate D1 database and test recipient, then verify the actual authenticated UI.
-- Configure the four Xero secrets securely (client ID, client secret, exact HTTPS callback, 32-byte base64 token encryption key); do not paste them into GitHub or chat.
-- Authorise and explicitly select Versatile Accounting's own Xero organisation. Keep uploads paused while verifying mappings, task rates and a cutover date with Suzie.
-- Verify one complete recorded/closed/reviewed/uploaded/invoiced-status pilot and duplicate prevention before production activation.
-
-Suzie's invoice workflow stays in Xero. Projects time marked INVOICED is not proof of payment; invoice authorisation and payment reconciliation are not implemented in the pilot. Existing projects/tasks are reused; automatic project creation and changes to charge-out rates are not performed.
+No credentials or secret values belong in this file, Git, tickets, chat, screenshots or logs.

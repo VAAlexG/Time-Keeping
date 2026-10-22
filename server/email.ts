@@ -1,11 +1,11 @@
-import type { DeliveryType, TimeStore } from './types';
+import type { DeliveryType, PriorityItem, ScheduleOccurrence, TimeStore } from './types';
 import { buildWeeklyWorkbook } from './report';
-import { getWeekRange } from './time';
+import { brisbaneNow, getWeekRange } from './time';
 
 export interface MailSender {
   send(input: {
     from: string;
-    to: string;
+    to: string | string[];
     subject: string;
     text: string;
     filename: string;
@@ -30,6 +30,7 @@ export function createResendSender(apiKey: string, fetcher: typeof fetch = fetch
     async send(input) {
       const response = await fetcher('https://api.resend.com/emails', {
         method: 'POST',
+        redirect: 'error',
         headers: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
@@ -37,7 +38,7 @@ export function createResendSender(apiKey: string, fetcher: typeof fetch = fetch
         },
         body: JSON.stringify({
           from: input.from,
-          to: [input.to],
+          to: Array.isArray(input.to) ? input.to : [input.to],
           subject: input.subject,
           text: input.text,
           attachments: [{ filename: input.filename, content: toBase64(input.content) }],
@@ -57,16 +58,32 @@ export async function sendWeeklyReport(input: {
   store: TimeStore;
   mailer: MailSender;
   from: string;
-  recipient: string;
+  recipient: string | string[];
   weekStart: string;
   type: DeliveryType;
   now?: Date;
+  priorities?: PriorityItem[];
+  schedule?: ScheduleOccurrence[];
 }): Promise<{ sent: boolean; reason?: string; filename?: string }> {
-  const claim = await input.store.claimDelivery(input.weekStart, input.type, input.recipient);
+  const current = input.now ?? new Date();
+  const deliveryDate = brisbaneNow(current).toISODate()!;
+  const recipients = Array.isArray(input.recipient) ? input.recipient : [input.recipient];
+  const recipientAudit = recipients.join(',');
+  const claim = await input.store.claimDelivery(
+    input.weekStart,
+    deliveryDate,
+    input.type,
+    recipientAudit,
+  );
   if (!claim.shouldSend) return { sent: false, reason: claim.reason };
   try {
-    const current = input.now ?? new Date();
-    const report = await buildWeeklyWorkbook(input.store, input.weekStart, current);
+    const report = await buildWeeklyWorkbook(
+      input.store,
+      input.weekStart,
+      current,
+      input.priorities,
+      input.schedule,
+    );
     const range = getWeekRange(input.weekStart, current);
     const providerMessageId = await input.mailer.send({
       from: input.from,
@@ -75,13 +92,19 @@ export async function sendWeeklyReport(input: {
       text: `Attached is the Timekeeper report for ${range.weekStart} to ${range.weekEnd} (Australia/Brisbane).`,
       filename: report.filename,
       content: report.buffer,
-      idempotencyKey: `timekeeper-${input.type}-${input.weekStart}`,
+      idempotencyKey: `timekeeper-v2-${input.type}-${input.weekStart}-${deliveryDate}`,
     });
-    await input.store.markDeliverySent(input.weekStart, input.type, current, providerMessageId);
+    await input.store.markDeliverySent(
+      input.weekStart,
+      deliveryDate,
+      input.type,
+      current,
+      providerMessageId,
+    );
     return { sent: true, filename: report.filename };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown report delivery error';
-    await input.store.markDeliveryFailed(input.weekStart, input.type, message);
+    await input.store.markDeliveryFailed(input.weekStart, deliveryDate, input.type, message);
     throw error;
   }
 }

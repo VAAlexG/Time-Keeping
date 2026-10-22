@@ -34,7 +34,7 @@ export function getDayRange(date: string): { from: Date; to: Date } {
 
 export function getWeekStart(value?: string, now = new Date()): DateTime {
   const date = value ? parseLocalDate(value) : brisbaneNow(now).startOf('day');
-  return date.minus({ days: date.weekday - 1 }).startOf('day');
+  return date.startOf('week');
 }
 
 export function getWeekRange(
@@ -58,6 +58,47 @@ export function getWeekRange(
 
 export function previousWeekStart(now = new Date()): string {
   return getWeekStart(undefined, now).minus({ weeks: 1 }).toISODate()!;
+}
+
+/** Friday 20:00 Australia/Brisbane on or before the supplied instant. */
+export function latestFridayCutoff(now = new Date()): Date {
+  const local = brisbaneNow(now);
+  let cutoff = local.startOf('day').set({ weekday: 5, hour: 20 });
+  if (cutoff > local) cutoff = cutoff.minus({ weeks: 1 });
+  return cutoff.toUTC().toJSDate();
+}
+
+/** The ordinary close interval is half-open: [previous Friday 20:00, cutoff). */
+export function fridayCloseRange(cutoff = latestFridayCutoff()): {
+  from: Date;
+  to: Date;
+  label: string;
+} {
+  const to = DateTime.fromJSDate(cutoff, { zone: 'utc' }).setZone(BRISBANE_ZONE);
+  if (to.weekday !== 5 || to.hour !== 20 || to.minute !== 0 || to.second !== 0)
+    throw new Error('Friday cutoff must be exactly 20:00 Australia/Brisbane');
+  const from = to.minus({ weeks: 1 });
+  return {
+    from: from.toUTC().toJSDate(),
+    to: to.toUTC().toJSDate(),
+    label: `${from.toFormat('dd LLL yyyy HH:mm')} – ${to.toFormat('dd LLL yyyy HH:mm')}`,
+  };
+}
+
+/** Every Friday 20:00 boundary strictly inside an interval. */
+export function fridayCutoffsBetween(start: Date, end: Date): Date[] {
+  if (!(start < end)) return [];
+  const result: Date[] = [];
+  let cursor = DateTime.fromJSDate(start, { zone: 'utc' })
+    .setZone(BRISBANE_ZONE)
+    .startOf('day')
+    .set({ weekday: 5, hour: 20 });
+  if (cursor.toMillis() <= start.getTime()) cursor = cursor.plus({ weeks: 1 });
+  while (cursor.toMillis() < end.getTime()) {
+    result.push(cursor.toUTC().toJSDate());
+    cursor = cursor.plus({ weeks: 1 });
+  }
+  return result;
 }
 
 export function durationMs(entry: Pick<TimeEntry, 'startAt' | 'endAt'>, now = new Date()): number {
