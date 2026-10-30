@@ -30,7 +30,7 @@ export function createResendSender(apiKey: string, fetcher: typeof fetch = fetch
     async send(input) {
       const response = await fetcher('https://api.resend.com/emails', {
         method: 'POST',
-        redirect: 'error',
+        redirect: 'manual',
         headers: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',

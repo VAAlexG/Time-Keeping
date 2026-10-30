@@ -27,8 +27,10 @@ import {
   BRISBANE_ZONE,
   brisbaneNow,
   durationMs,
+  fridayCloseRange,
   getDayRange,
   getWeekRange,
+  latestFridayCutoff,
   overlapMs,
   parseLocalDate,
   parseLocalDateTime,
@@ -253,6 +255,16 @@ async function closePreviewHash(input: {
       activationBaseline: input.activationBaseline,
     }),
   );
+}
+
+async function manualClosePlan(db: D1Database, now: Date) {
+  const state = await db
+    .prepare('SELECT activated_at FROM close_control WHERE id = 1')
+    .first<{ activated_at: number | null }>();
+  if (!state) throw new Error('Friday close control is not initialised');
+  if (state.activated_at !== null) return { cutoff: now, activationCutoff: undefined };
+  const cutoff = latestFridayCutoff(now);
+  return { cutoff, activationCutoff: fridayCloseRange(cutoff).from };
 }
 function requireAdmin(context: Context<AppContext>): Response | undefined {
   if (context.get('actor').role !== 'admin')
@@ -1500,9 +1512,11 @@ export function createApp(identityVerifier: IdentityVerifier = verifyAccessIdent
     const denied = requireAdmin(context);
     if (denied) return denied;
     const now = new Date();
+    const plan = await manualClosePlan(context.env.DB, now);
     const preview = await previewFridayClose({
       db: context.env.DB,
-      cutoff: now,
+      cutoff: plan.cutoff,
+      activationCutoff: plan.activationCutoff,
       kind: 'manual',
       now,
     });
@@ -1564,9 +1578,19 @@ export function createApp(identityVerifier: IdentityVerifier = verifyAccessIdent
     const cutoff = new Date(parsed.data.cutoff);
     try {
       const now = new Date();
+      const plan = await manualClosePlan(context.env.DB, now);
+      if (plan.activationCutoff && cutoff.getTime() !== plan.cutoff.getTime()) {
+        return context.json(
+          {
+            error: 'The close preview changed or the confirmation did not match. Preview it again.',
+          },
+          409,
+        );
+      }
       const preview = await previewFridayClose({
         db: context.env.DB,
         cutoff,
+        activationCutoff: plan.activationCutoff,
         kind: 'manual',
         now,
       });
@@ -1606,6 +1630,7 @@ export function createApp(identityVerifier: IdentityVerifier = verifyAccessIdent
         confirmationCutoff: cutoff.toISOString(),
         expectedSourceHash: preview.sourceHash,
         expectedActivationSourceHash: activationBaseline?.sourceHash,
+        activationCutoff: plan.activationCutoff,
         reason: parsed.data.reason,
       });
       return context.json(result);

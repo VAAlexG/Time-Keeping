@@ -7,7 +7,7 @@ import {
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { brisbaneNow, getWeekRange } from '../server/time';
+import { brisbaneNow, fridayCloseRange, getWeekRange, latestFridayCutoff } from '../server/time';
 import worker, { createApp, runScheduledFinalization, runScheduledReport } from '../worker';
 import type { AccessIdentity } from '../worker/access';
 import type { Env } from '../worker/env';
@@ -424,13 +424,25 @@ describe('administrator reporting and delivery', () => {
     expect(previewResponse.status).toBe(200);
     const preview = (await previewResponse.json()) as {
       cutoff: string;
+      periodStart: string;
+      periodEnd: string;
       previewHash: string;
       confirmationPhrase: string;
-      activationBaseline: { entryCount: number; runningTimersToSplit: number } | null;
+      activationBaseline: {
+        periodEnd: string;
+        entryCount: number;
+        runningTimersToSplit: number;
+      } | null;
     };
+    const expectedCutoff = latestFridayCutoff();
+    const expectedActivationCutoff = fridayCloseRange(expectedCutoff).from;
+    expect(preview.cutoff).toBe(expectedCutoff.toISOString());
+    expect(preview.periodStart).toBe(expectedActivationCutoff.toISOString());
+    expect(preview.periodEnd).toBe(expectedCutoff.toISOString());
     expect(preview.previewHash).toMatch(/^[a-f0-9]{64}$/);
     expect(preview.confirmationPhrase).toContain(preview.cutoff);
     if (preview.activationBaseline) {
+      expect(preview.activationBaseline.periodEnd).toBe(expectedActivationCutoff.toISOString());
       expect(preview.activationBaseline.entryCount).toBeGreaterThanOrEqual(0);
       expect(preview.activationBaseline.runningTimersToSplit).toBeGreaterThanOrEqual(0);
     }
@@ -644,5 +656,100 @@ describe('administrator reporting and delivery', () => {
     expect(download.headers.get('content-disposition')).toContain('time-report-2026-08-24');
     expect(download.headers.get('cache-control')).toBe('no-store');
     expect((await download.arrayBuffer()).byteLength).toBeGreaterThan(5000);
+  });
+
+  it('executes the confirmed first-week catch-up without queuing the historical baseline', async () => {
+    const admin = await signIn(ALEX);
+    const reportCutoff = latestFridayCutoff();
+    const activationCutoff = fridayCloseRange(reportCutoff).from;
+    for (const [notes, start, end] of [
+      [
+        'Historical baseline entry',
+        activationCutoff.getTime() - 2 * 60 * 60_000,
+        activationCutoff.getTime() - 60 * 60_000,
+      ],
+      [
+        'First delivered Friday-close week',
+        activationCutoff.getTime() + 60 * 60_000,
+        activationCutoff.getTime() + 2 * 60 * 60_000,
+      ],
+    ] as const) {
+      const created = await call('/api/entries', {
+        method: 'POST',
+        headers: headers(admin),
+        body: JSON.stringify({
+          ...CLIENT_WORK,
+          notes,
+          startLocal: new Date(start).toISOString(),
+          endLocal: new Date(end).toISOString(),
+        }),
+      });
+      expect(created.status).toBe(201);
+    }
+
+    const previewResponse = await call('/api/close/preview', {
+      method: 'POST',
+      headers: headers(admin),
+      body: '{}',
+    });
+    expect(previewResponse.status).toBe(200);
+    const preview = (await previewResponse.json()) as {
+      cutoff: string;
+      previewHash: string;
+      confirmationPhrase: string;
+      entryCount: number;
+      recipients: string[];
+      activationBaseline: { periodEnd: string; entryCount: number };
+    };
+    expect(preview).toMatchObject({
+      cutoff: reportCutoff.toISOString(),
+      entryCount: 1,
+      recipients: [ALEX, BRENDON, SUZIE],
+      activationBaseline: { periodEnd: activationCutoff.toISOString(), entryCount: 1 },
+    });
+
+    const closed = await call('/api/close', {
+      method: 'POST',
+      headers: headers(admin),
+      body: JSON.stringify({
+        cutoff: preview.cutoff,
+        previewHash: preview.previewHash,
+        confirmation: preview.confirmationPhrase,
+        reason: 'Authorised first complete Friday-close recovery',
+      }),
+    });
+    expect(closed.status).toBe(200);
+    expect(await closed.json()).toMatchObject({
+      activation: {
+        period: { cutoffAt: activationCutoff.toISOString(), suppressDelivery: true },
+      },
+      close: {
+        period: {
+          coverageFrom: activationCutoff.toISOString(),
+          cutoffAt: reportCutoff.toISOString(),
+          suppressDelivery: false,
+        },
+      },
+    });
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM report_delivery_outbox d
+         JOIN report_versions r ON r.id=d.report_id
+         JOIN close_periods p ON p.id=r.close_period_id
+         WHERE p.cutoff_at=?`,
+      )
+        .bind(activationCutoff.getTime())
+        .first<{ count: number }>(),
+    ).toEqual({ count: 0 });
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM report_delivery_outbox d
+         JOIN report_versions r ON r.id=d.report_id
+         JOIN close_periods p ON p.id=r.close_period_id
+         WHERE p.cutoff_at=?`,
+      )
+        .bind(reportCutoff.getTime())
+        .first<{ count: number }>(),
+    ).toEqual({ count: 3 });
   });
 });

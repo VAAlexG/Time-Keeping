@@ -3,7 +3,7 @@ import { createResendSender, sendWeeklyReport, type MailSender } from '../server
 import { MemoryTimeStore } from './memory-store';
 
 describe('weekly email idempotency', () => {
-  it('refuses redirects when sending the Resend API key', async () => {
+  it('requests manual redirect handling when sending the Resend API key', async () => {
     const fetcher = vi.fn<typeof fetch>(
       async () =>
         new Response(JSON.stringify({ id: 'email-1' }), {
@@ -20,7 +20,30 @@ describe('weekly email idempotency', () => {
       content: new Uint8Array([1, 2, 3]),
       idempotencyKey: 'weekly-report-1',
     });
-    expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe('error');
+    expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe('manual');
+  });
+
+  it('does not follow and rejects a Resend redirect', async () => {
+    const fetcher = vi.fn<typeof fetch>(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { Location: 'https://redirect.invalid/collect' },
+        }),
+    );
+    await expect(
+      createResendSender('test-key', fetcher).send({
+        from: 'reports@example.com',
+        to: 'recipient@example.com',
+        subject: 'Report',
+        text: 'Attached',
+        filename: 'report.xlsx',
+        content: new Uint8Array([1, 2, 3]),
+        idempotencyKey: 'weekly-report-redirect',
+      }),
+    ).rejects.toThrow('Resend delivery failed (302)');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe('manual');
   });
 
   it('sends a scheduled report once and keeps test delivery separate', async () => {

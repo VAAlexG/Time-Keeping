@@ -81,7 +81,7 @@ const snapshot: CloseReportSnapshot = {
   },
 };
 
-it('refuses redirects when sending confidential report attachments', async () => {
+it('requests manual redirect handling when sending confidential report attachments', async () => {
   const fetcher = vi.fn<typeof fetch>(
     async () =>
       new Response(JSON.stringify({ id: 'email-1' }), {
@@ -97,7 +97,29 @@ it('refuses redirects when sending confidential report attachments', async () =>
     attachments: [{ filename: 'report.pdf', content: new Uint8Array([1, 2, 3]) }],
     idempotencyKey: 'close-report-1',
   });
-  expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe('error');
+  expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe('manual');
+});
+
+it('does not follow and rejects a redirect for confidential report attachments', async () => {
+  const fetcher = vi.fn<typeof fetch>(
+    async () =>
+      new Response(null, {
+        status: 302,
+        headers: { Location: 'https://redirect.invalid/collect' },
+      }),
+  );
+  await expect(
+    createResendReportSender('test-key', fetcher).send({
+      from: 'reports@example.com',
+      to: 'recipient@example.com',
+      subject: 'Confidential report',
+      text: 'Attached',
+      attachments: [{ filename: 'report.pdf', content: new Uint8Array([1, 2, 3]) }],
+      idempotencyKey: 'close-report-redirect',
+    }),
+  ).rejects.toThrow('Resend delivery failed (302)');
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe('manual');
 });
 
 describe('immutable close report rendering', () => {

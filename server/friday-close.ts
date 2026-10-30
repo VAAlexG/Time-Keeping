@@ -1,7 +1,7 @@
 import { DateTime } from 'luxon';
 
 import { saveCloseReportVersion, sha256Hex, type SavedCloseReport } from './close-report';
-import { BRISBANE_ZONE, fridayCutoffsBetween, latestFridayCutoff } from './time';
+import { BRISBANE_ZONE, fridayCloseRange, fridayCutoffsBetween, latestFridayCutoff } from './time';
 
 const WEEK_MS = 7 * 24 * 60 * 60_000;
 const MIN_REASON_LENGTH = 5;
@@ -213,6 +213,27 @@ async function firstCoverage(db: D1Database, cutoff: number): Promise<number> {
     : cutoff - WEEK_MS;
 }
 
+function isExactFridayCutoff(value: Date): boolean {
+  const local = DateTime.fromJSDate(value, { zone: 'utc' }).setZone(BRISBANE_ZONE);
+  return (
+    local.weekday === 5 &&
+    local.hour === 20 &&
+    local.minute === 0 &&
+    local.second === 0 &&
+    local.millisecond === 0
+  );
+}
+
+function validateActivationCatchUpCutoffs(activationCutoff: Date, reportCutoff: Date): void {
+  if (!isExactFridayCutoff(reportCutoff))
+    throw new Error('The catch-up report cutoff must be exactly Friday 20:00 Brisbane');
+  if (!isExactFridayCutoff(activationCutoff))
+    throw new Error('The activation cutoff must be exactly Friday 20:00 Brisbane');
+  const expected = fridayCloseRange(reportCutoff).from;
+  if (activationCutoff.getTime() !== expected.getTime())
+    throw new Error('The activation cutoff must be the immediately preceding Friday cutoff');
+}
+
 /**
  * Effective lock used by every mutating endpoint. Once activated, the Friday
  * boundary applies even if the scheduled close job has not yet materialised it.
@@ -280,15 +301,29 @@ async function previewRange(input: {
 export async function previewFridayClose(input: {
   db: D1Database;
   cutoff?: Date;
+  /**
+   * Explicit baseline boundary for the one-time first-week catch-up. It must
+   * be the Friday immediately before `cutoff`; older history is locked with
+   * delivery suppressed and the following full Friday-to-Friday period is
+   * previewed for delivery.
+   */
+  activationCutoff?: Date;
   kind?: Exclude<CloseKind, 'initial'>;
   now?: Date;
 }): Promise<FridayClosePreview> {
   const now = input.now ?? new Date();
   const cutoff = input.cutoff ?? latestFridayCutoff(now);
   if (cutoff.getTime() > now.getTime()) throw new Error('A close cutoff cannot be in the future');
+  if (input.activationCutoff) {
+    validateActivationCatchUpCutoffs(input.activationCutoff, cutoff);
+    if (cutoff.getTime() !== latestFridayCutoff(now).getTime())
+      throw new Error('The catch-up report cutoff must be the latest completed Friday cutoff');
+  }
   const state = await control(input.db);
   if (state.activated_at === null) {
-    const initialCutoff = latestFridayCutoff(now).getTime();
+    const initialCutoff =
+      input.activationCutoff?.getTime() ??
+      (isExactFridayCutoff(cutoff) ? cutoff.getTime() : latestFridayCutoff(now).getTime());
     const baselineCoverage = await firstCoverage(input.db, initialCutoff);
     if ((input.kind ?? 'manual') === 'manual' && cutoff.getTime() > initialCutoff) {
       const preview = await previewRange({
@@ -908,12 +943,19 @@ export async function activateFridayClose(input: {
   recipients: string[];
   actorUserId?: string | null;
   expectedSourceHash?: string;
+  /** Exact historical baseline boundary selected by a confirmed catch-up preview. */
+  cutoff?: Date;
   now?: Date;
 }): Promise<FridayCloseResult | null> {
   const now = input.now ?? new Date();
   const state = await control(input.db);
   if (state.activated_at !== null) return null;
-  const cutoffAt = latestFridayCutoff(now).getTime();
+  const cutoff = input.cutoff ?? latestFridayCutoff(now);
+  if (cutoff.getTime() > now.getTime())
+    throw new Error('The activation cutoff cannot be in the future');
+  if (!isExactFridayCutoff(cutoff))
+    throw new Error('The activation cutoff must be exactly Friday 20:00 Brisbane');
+  const cutoffAt = cutoff.getTime();
   return closeOne({
     db: input.db,
     coverageFrom: await firstCoverage(input.db, cutoffAt),
@@ -1098,6 +1140,8 @@ export async function runManualFridayClose(input: {
   confirmationCutoff: string;
   expectedSourceHash?: string;
   expectedActivationSourceHash?: string;
+  /** Baseline boundary from an exact first-week catch-up preview. */
+  activationCutoff?: Date;
   reason: string;
   now?: Date;
 }): Promise<{ activation: FridayCloseResult | null; close: FridayCloseResult }> {
@@ -1108,11 +1152,17 @@ export async function runManualFridayClose(input: {
     throw new Error('A manual cutoff cannot be in the future');
   if (input.confirmationCutoff !== input.cutoff.toISOString())
     throw new Error('Manual close confirmation no longer matches the cutoff');
+  if (input.activationCutoff) {
+    validateActivationCatchUpCutoffs(input.activationCutoff, input.cutoff);
+    if (input.cutoff.getTime() !== latestFridayCutoff(now).getTime())
+      throw new Error('The catch-up report cutoff must be the latest completed Friday cutoff');
+  }
   const activation = await activateFridayClose({
     db: input.db,
     recipients: input.recipients,
     actorUserId: input.actorUserId,
     expectedSourceHash: input.expectedActivationSourceHash,
+    cutoff: input.activationCutoff,
     now,
   });
   const state = await control(input.db);

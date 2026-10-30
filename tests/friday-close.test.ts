@@ -500,6 +500,146 @@ describe('Friday 20:00 Brisbane close', () => {
     });
   });
 
+  it('baseline-locks history through the previous Friday and delivers the full catch-up week', async () => {
+    await entry({
+      id: 'catch-up-history',
+      start: '2026-08-13T08:00:00.000Z',
+      end: '2026-08-13T09:00:00.000Z',
+    });
+    await entry({
+      id: 'catch-up-week',
+      start: '2026-08-15T00:00:00.000Z',
+      end: '2026-08-15T02:00:00.000Z',
+    });
+    const activationCutoff = new Date('2026-08-14T10:00:00.000Z');
+    const reportCutoff = new Date('2026-08-21T10:00:00.000Z');
+    const now = new Date('2026-08-21T10:30:00.000Z');
+    const recipients = ['alex@example.com', 'brendon@example.com', 'suzie@example.com'];
+
+    const preview = await previewFridayClose({
+      db: env.DB,
+      cutoff: reportCutoff,
+      activationCutoff,
+      kind: 'manual',
+      now,
+    });
+    expect(preview).toMatchObject({
+      coverageFrom: activationCutoff.toISOString(),
+      cutoffAt: reportCutoff.toISOString(),
+      entryCount: 1,
+      totalMs: 2 * 60 * 60_000,
+      willActivate: true,
+      activationBaseline: { cutoffAt: activationCutoff.toISOString() },
+    });
+    const baseline = await previewFridayClose({
+      db: env.DB,
+      cutoff: activationCutoff,
+      kind: 'manual',
+      now,
+    });
+    expect(baseline).toMatchObject({
+      kind: 'initial',
+      cutoffAt: activationCutoff.toISOString(),
+      entryCount: 1,
+      totalMs: 60 * 60_000,
+      historicalEmailSuppressed: true,
+    });
+
+    const result = await runManualFridayClose({
+      db: env.DB,
+      recipients,
+      actorUserId: USER,
+      cutoff: reportCutoff,
+      activationCutoff,
+      confirmationCutoff: reportCutoff.toISOString(),
+      expectedSourceHash: preview.sourceHash,
+      expectedActivationSourceHash: baseline.sourceHash,
+      reason: 'Recover the first complete Friday reporting period',
+      now,
+    });
+
+    expect(result.activation?.period).toMatchObject({
+      kind: 'initial',
+      cutoffAt: activationCutoff.toISOString(),
+      suppressDelivery: true,
+      entryCount: 1,
+    });
+    expect(result.close.period).toMatchObject({
+      kind: 'manual',
+      coverageFrom: activationCutoff.toISOString(),
+      cutoffAt: reportCutoff.toISOString(),
+      suppressDelivery: false,
+      entryCount: 1,
+      totalMs: 2 * 60 * 60_000,
+    });
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM report_delivery_outbox d
+         JOIN report_versions r ON r.id=d.report_id
+         JOIN close_periods p ON p.id=r.close_period_id
+         WHERE p.cutoff_at=?`,
+      )
+        .bind(activationCutoff.getTime())
+        .first<{ count: number }>(),
+    ).toEqual({ count: 0 });
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM report_delivery_outbox d
+         JOIN report_versions r ON r.id=d.report_id
+         JOIN close_periods p ON p.id=r.close_period_id
+         WHERE p.cutoff_at=?`,
+      )
+        .bind(reportCutoff.getTime())
+        .first<{ count: number }>(),
+    ).toEqual({ count: recipients.length });
+    expect(
+      await env.DB.prepare('SELECT cutoff_at FROM close_periods ORDER BY cutoff_at').all<{
+        cutoff_at: number;
+      }>(),
+    ).toMatchObject({
+      results: [{ cutoff_at: activationCutoff.getTime() }, { cutoff_at: reportCutoff.getTime() }],
+    });
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS count FROM time_entries WHERE locked_at IS NOT NULL',
+      ).first<{ count: number }>(),
+    ).toEqual({ count: 2 });
+  });
+
+  it('rejects a catch-up baseline that is not the immediately preceding Friday cutoff', async () => {
+    const reportCutoff = new Date('2026-08-21T10:00:00.000Z');
+    await expect(
+      previewFridayClose({
+        db: env.DB,
+        cutoff: reportCutoff,
+        activationCutoff: new Date('2026-08-07T10:00:00.000Z'),
+        kind: 'manual',
+        now: new Date('2026-08-21T10:30:00.000Z'),
+      }),
+    ).rejects.toThrow('immediately preceding Friday');
+    await expect(
+      runManualFridayClose({
+        db: env.DB,
+        recipients: [],
+        actorUserId: USER,
+        cutoff: reportCutoff,
+        activationCutoff: new Date('2026-08-14T10:01:00.000Z'),
+        confirmationCutoff: reportCutoff.toISOString(),
+        reason: 'Reject an invalid catch-up boundary',
+        now: new Date('2026-08-21T10:30:00.000Z'),
+      }),
+    ).rejects.toThrow('exactly Friday 20:00 Brisbane');
+    await expect(
+      previewFridayClose({
+        db: env.DB,
+        cutoff: new Date('2026-08-14T10:00:00.000Z'),
+        activationCutoff: new Date('2026-08-07T10:00:00.000Z'),
+        kind: 'manual',
+        now: new Date('2026-08-21T10:30:00.000Z'),
+      }),
+    ).rejects.toThrow('latest completed Friday cutoff');
+  });
+
   it('checks report-visible source content after acquiring the manual-close fence', async () => {
     await runScheduledFridayCloses({
       db: env.DB,

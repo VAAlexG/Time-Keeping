@@ -901,6 +901,10 @@ describe('reviewed Xero Projects workflow', () => {
 
   it('returns a proven pre-write context failure to a fresh audited review', async () => {
     const first = await approveSeededEntry();
+    // The review-list UI intentionally uses the wall clock. Keep this fixture
+    // current so the test exercises the reset transition rather than the
+    // unrelated 24-hour catalogue-staleness guard as the calendar advances.
+    await env.DB.prepare('UPDATE xero_projects_catalog SET fetched_at=?').bind(Date.now()).run();
     await env.DB.prepare(
       `UPDATE xero_projects_connection
           SET mapping_revision=mapping_revision+1,updated_at=? WHERE id=1`,

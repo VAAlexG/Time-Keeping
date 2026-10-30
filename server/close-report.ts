@@ -1172,7 +1172,7 @@ export function createResendReportSender(
       try {
         response = await fetcher('https://api.resend.com/emails', {
           method: 'POST',
-          redirect: 'error',
+          redirect: 'manual',
           headers: {
             Authorization: `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
