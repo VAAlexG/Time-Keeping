@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  amendmentDefaultStart,
+  amendmentIntervalError,
   archivedEmailStatusLabel,
   formatBrisbaneDateTime,
   mergeBillingReviewPage,
@@ -44,6 +46,34 @@ describe('truthful workflow presentation', () => {
     expect(formatted).toContain('14 Aug 2026');
     expect(formatted).toContain('8:00 pm');
     expect(formatted).toContain('Brisbane');
+  });
+
+  it('prefills late-entry drafts at a valid Brisbane weekday morning', () => {
+    expect(
+      amendmentDefaultStart({
+        coverageFrom: '2026-08-07T10:00:00.000Z',
+        cutoffAt: '2026-08-14T10:00:00.000Z',
+      }),
+    ).toBe('2026-08-10T09:00');
+  });
+
+  it('rejects late-entry intervals outside coverage or across a Brisbane day', () => {
+    const window = {
+      coverageFrom: '2026-08-07T10:00:00.000Z',
+      cutoffAt: '2026-08-14T10:00:00.000Z',
+    };
+    expect(
+      amendmentIntervalError(window, '2026-08-09T23:00:00.000Z', '2026-08-10T00:00:00.000Z'),
+    ).toBeNull();
+    expect(
+      amendmentIntervalError(window, '2026-08-10T13:00:00.000Z', '2026-08-10T14:00:00.000Z'),
+    ).toBeNull();
+    expect(
+      amendmentIntervalError(window, '2026-08-07T09:30:00.000Z', '2026-08-07T10:30:00.000Z'),
+    ).toContain('inside');
+    expect(
+      amendmentIntervalError(window, '2026-08-10T13:30:00.000Z', '2026-08-10T14:30:00.000Z'),
+    ).toContain('calendar day');
   });
 });
 

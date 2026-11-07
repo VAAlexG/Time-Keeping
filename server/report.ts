@@ -28,7 +28,11 @@ export async function buildWeeklyWorkbook(
   schedule: ScheduleOccurrence[] = [],
 ) {
   const range = getWeekRange(weekStart, now);
-  const entries = await store.listEntries({ from: range.from, to: range.to });
+  const entries = await store.listEntries({
+    from: range.from,
+    to: range.to,
+    excludeAmendmentDrafts: true,
+  });
   const segments = entries.flatMap((entry) =>
     splitEntryByBrisbaneDay(entry, range.from, range.to, now),
   );

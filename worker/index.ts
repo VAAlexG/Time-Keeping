@@ -5,6 +5,14 @@ import { z } from 'zod';
 import { importCatalogCsv, syncFromFyi } from '../server/catalog-sync';
 import { buildClientTimePdf } from '../server/client-report';
 import {
+  CloseAmendmentProblem,
+  finalizeCloseAmendmentWindow,
+  getCurrentCloseAmendment,
+  listCloseAmendmentAdminData,
+  openCloseAmendmentWindow,
+  recoverFinalizingCloseAmendments,
+} from '../server/close-amendments';
+import {
   createResendReportSender,
   processReportDeliveryOutbox,
   sha256Hex,
@@ -137,6 +145,15 @@ const correctionSchema = z.intersection(
 );
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const idSchema = z.string().uuid();
+const closeAmendmentOpenSchema = z.object({
+  closePeriodId: idSchema,
+  userId: idSchema,
+  reason: z.string().trim().min(5).max(1000),
+  expiresAt: z.string().datetime({ offset: true }).optional(),
+});
+const closeAmendmentFinalizeSchema = z.object({
+  reason: z.string().trim().min(5).max(1000),
+});
 const priorityAssigneeSchema = z.enum(['alex', 'brendon', 'suzie']);
 const priorityItemSchema = z.object({
   title: z.string().trim().min(1).max(240),
@@ -390,8 +407,25 @@ function classificationError(error: unknown): string | null {
       'That time falls in a closed period. An administrator must use the audited correction flow.',
     LOCKED_ENTRY: 'This entry is locked. An administrator must use the audited correction flow.',
     LOCK_BOUNDARY_SPLIT_REQUIRED: 'The timer crossed a Friday close and is being reconciled.',
+    AMENDMENT_SINGLE_DAY_REQUIRED:
+      'Late time must start and finish within one Brisbane calendar day.',
+    ENTRY_REVISION_CONFLICT: 'This entry changed in another session. Reload and try again.',
   };
   return messages[error.message] ?? null;
+}
+function closeAmendmentFailure(context: Context<AppContext>, error: unknown): Response {
+  if (error instanceof CloseAmendmentProblem)
+    return context.json({ error: error.message, code: error.code }, error.status);
+  console.error(
+    JSON.stringify({
+      event: 'close_amendment_error',
+      message: error instanceof Error ? error.message : 'unknown',
+    }),
+  );
+  return context.json(
+    { error: 'The late-entry amendment request could not be completed.', code: 'AMENDMENT_FAILED' },
+    500,
+  );
 }
 function totals(entries: TimeEntry[], from: Date, to: Date, now = new Date()) {
   const duration = (entry: TimeEntry) => overlapMs(entry, from, to, now);
@@ -505,6 +539,73 @@ export function createApp(identityVerifier: IdentityVerifier = verifyAccessIdent
         canReviewBilling: canReviewBilling(user, context.env),
       })),
     });
+  });
+  app.get('/api/close-amendments/current', async (context) => {
+    const window = await getCurrentCloseAmendment(
+      context.env.DB,
+      context.get('actor').id,
+      new Date(),
+    );
+    return context.json({ window });
+  });
+  app.get('/api/admin/close-amendments', async (context) => {
+    const denied = requireAdmin(context);
+    if (denied) return denied;
+    return context.json(await listCloseAmendmentAdminData(context.env.DB));
+  });
+  app.post('/api/admin/close-amendments', async (context) => {
+    const denied = requireAdmin(context);
+    if (denied) return denied;
+    const parsed = closeAmendmentOpenSchema.safeParse(await parseJson(context));
+    if (!parsed.success)
+      return context.json(
+        {
+          error: 'Choose a closed period, employee, reason, and optional future expiry.',
+          code: 'AMENDMENT_INPUT_INVALID',
+          details: parsed.error.flatten(),
+        },
+        400,
+      );
+    try {
+      const window = await openCloseAmendmentWindow({
+        db: context.env.DB,
+        closePeriodId: parsed.data.closePeriodId,
+        userId: parsed.data.userId,
+        actorUserId: context.get('actor').id,
+        reason: parsed.data.reason,
+        ...(parsed.data.expiresAt ? { expiresAt: new Date(parsed.data.expiresAt) } : {}),
+      });
+      return context.json({ window }, 201);
+    } catch (error) {
+      return closeAmendmentFailure(context, error);
+    }
+  });
+  app.post('/api/admin/close-amendments/:id/finalize', async (context) => {
+    const denied = requireAdmin(context);
+    if (denied) return denied;
+    const windowId = idSchema.safeParse(context.req.param('id'));
+    const parsed = closeAmendmentFinalizeSchema.safeParse(await parseJson(context));
+    if (!windowId.success || !parsed.success)
+      return context.json(
+        {
+          error: 'Choose a valid amendment window and provide a finalization reason.',
+          code: 'AMENDMENT_INPUT_INVALID',
+        },
+        400,
+      );
+    try {
+      return context.json(
+        await finalizeCloseAmendmentWindow({
+          db: context.env.DB,
+          windowId: windowId.data,
+          actorUserId: context.get('actor').id,
+          reason: parsed.data.reason,
+          recipients: reportRecipientList(context.env),
+        }),
+      );
+    } catch (error) {
+      return closeAmendmentFailure(context, error);
+    }
   });
   app.get('/api/catalog', async (context) => {
     const store = new D1TimeStore(context.env.DB);
@@ -1095,7 +1196,11 @@ export function createApp(identityVerifier: IdentityVerifier = verifyAccessIdent
       return context.json({ entry, xeroWarning }, 201);
     } catch (error) {
       const message = classificationError(error) ?? (error instanceof Error ? error.message : null);
-      if (message) return context.json({ error: message }, 400);
+      if (message)
+        return context.json(
+          { error: message },
+          error instanceof Error && error.message === 'ENTRY_REVISION_CONFLICT' ? 409 : 400,
+        );
       throw error;
     }
   });
@@ -1136,7 +1241,11 @@ export function createApp(identityVerifier: IdentityVerifier = verifyAccessIdent
       return context.json({ entry, xeroWarning });
     } catch (error) {
       const message = classificationError(error) ?? (error instanceof Error ? error.message : null);
-      if (message) return context.json({ error: message }, 400);
+      if (message)
+        return context.json(
+          { error: message },
+          error instanceof Error && error.message === 'ENTRY_REVISION_CONFLICT' ? 409 : 400,
+        );
       throw error;
     }
   });
@@ -1287,9 +1396,12 @@ export function createApp(identityVerifier: IdentityVerifier = verifyAccessIdent
       });
       return context.json(result);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to correct locked time.';
+      const raw = error instanceof Error ? error.message : 'Unable to correct locked time.';
+      const message = raw.includes('AMENDMENT_CORRECTION_CONFLICT')
+        ? 'A late-entry amendment window is active for this period. Finalize it before making a locked-entry correction.'
+        : raw;
       const conflict = message.includes('CONFLICT') || message.includes('not found');
-      return context.json({ error: message }, conflict ? 409 : 400);
+      return context.json({ error: message }, conflict || raw.includes('AMENDMENT_') ? 409 : 400);
     }
   });
   app.delete('/api/entries/:id', async (context) => {
@@ -1694,6 +1806,7 @@ export function createApp(identityVerifier: IdentityVerifier = verifyAccessIdent
         clientId: client.id,
         workType: 'client',
         billable: true,
+        excludeAmendmentDrafts: true,
       })
     ).filter((entry) => entry.endAt !== null);
     if (!entries.length)
@@ -1946,6 +2059,18 @@ export async function runScheduledReportRecovery(env: Env, scheduledTime = Date.
     );
   return result;
 }
+export async function runScheduledAmendmentRecovery(env: Env, scheduledTime = Date.now()) {
+  const result = await recoverFinalizingCloseAmendments({
+    db: env.DB,
+    recipients: reportRecipientList(env),
+    now: new Date(scheduledTime),
+  });
+  if (result.failed.length)
+    console.error(
+      JSON.stringify({ event: 'close_amendment_recovery_incomplete', failed: result.failed }),
+    );
+  return result;
+}
 export async function runScheduledXeroProjects(env: Env, scheduledTime = Date.now()) {
   if (env.XERO_ENABLED !== 'true') return { skipped: true as const, reason: 'disabled' as const };
   const current = await xeroProjectsConnection(env.DB);
@@ -1991,6 +2116,17 @@ export async function runScheduledXeroCatalogue(env: Env, scheduledTime = Date.n
 }
 export async function runScheduledDurableOutboxes(env: Env, scheduledTime = Date.now()) {
   await runScheduledReportRecovery(env, scheduledTime);
+  const [amendmentRecovery] = await Promise.allSettled([
+    runScheduledAmendmentRecovery(env, scheduledTime),
+  ]);
+  if (amendmentRecovery.status === 'rejected')
+    console.error(
+      JSON.stringify({
+        event: 'close_amendment_recovery_failed',
+        message:
+          amendmentRecovery.reason instanceof Error ? amendmentRecovery.reason.message : 'unknown',
+      }),
+    );
   return Promise.allSettled([
     runScheduledReportDeliveries(env, scheduledTime),
     runScheduledXeroProjects(env, scheduledTime),

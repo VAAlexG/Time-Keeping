@@ -177,7 +177,7 @@ async function closeSourceHash(
        FROM time_entries e
        JOIN users u ON u.id = e.user_id
        LEFT JOIN xero_projects_entry_selections xs ON xs.entry_id = e.id
-       WHERE e.locked_at IS NULL AND e.start_at < ?
+       WHERE e.locked_at IS NULL AND e.amendment_window_id IS NULL AND e.start_at < ?
          AND COALESCE(e.end_at, ?) > ?
        ORDER BY MAX(e.start_at, ?), COALESCE(e.segment_root_id, e.id), e.id`,
     )
@@ -205,7 +205,9 @@ async function closeSourceHash(
 
 async function firstCoverage(db: D1Database, cutoff: number): Promise<number> {
   const row = await db
-    .prepare('SELECT MIN(start_at) AS first_start FROM time_entries WHERE start_at < ?')
+    .prepare(
+      'SELECT MIN(start_at) AS first_start FROM time_entries WHERE amendment_window_id IS NULL AND start_at < ?',
+    )
     .bind(cutoff)
     .first<{ first_start: number | null }>();
   return row?.first_start !== null && row?.first_start !== undefined
@@ -263,7 +265,8 @@ async function previewRange(input: {
         COALESCE(SUM(CASE WHEN start_at < ? AND (end_at IS NULL OR end_at > ?) THEN 1 ELSE 0 END), 0) AS crossing_entries,
         COALESCE(SUM(CASE WHEN start_at < ? AND end_at IS NULL THEN 1 ELSE 0 END), 0) AS running_continuations
        FROM time_entries
-       WHERE locked_at IS NULL AND start_at < ? AND COALESCE(end_at, ?) > ?`,
+       WHERE locked_at IS NULL AND amendment_window_id IS NULL
+         AND start_at < ? AND COALESCE(end_at, ?) > ?`,
       )
       .bind(
         input.cutoffAt,
@@ -373,7 +376,8 @@ async function entriesNeedingSegments(
         activity_name_snapshot, legacy_project_name_snapshot, revision, segment_root_id,
         segment_parent_id, segment_index, original_start_at, original_end_at
        FROM time_entries
-       WHERE locked_at IS NULL AND start_at >= ? AND start_at < ?
+       WHERE locked_at IS NULL AND amendment_window_id IS NULL
+         AND start_at >= ? AND start_at < ?
          AND (end_at IS NULL OR end_at > ?)
        ORDER BY start_at, id`,
     )
@@ -807,7 +811,7 @@ async function closeOne(input: {
              SET asserted = CASE WHEN EXISTS (
                SELECT 1 FROM time_entries
                WHERE id = ? AND revision = ? AND start_at = ? AND end_at IS ?
-                 AND locked_at IS NULL AND active_guard IS ?
+                 AND locked_at IS NULL AND amendment_window_id IS NULL AND active_guard IS ?
              ) THEN 1 ELSE 0 END
              WHERE id = 1`,
           )
@@ -823,7 +827,8 @@ async function closeOne(input: {
                  segment_root_id = COALESCE(segment_root_id, id),
                  original_start_at = COALESCE(original_start_at, start_at),
                  original_end_at = COALESCE(original_end_at, end_at)
-             WHERE id = ? AND revision = ? AND locked_at IS NULL AND start_at < ?
+             WHERE id = ? AND revision = ? AND locked_at IS NULL
+               AND amendment_window_id IS NULL AND start_at < ?
                AND (end_at IS NULL OR end_at > ?)`,
           )
           .bind(
@@ -875,7 +880,8 @@ async function closeOne(input: {
                updated_at = ?, segment_root_id = COALESCE(segment_root_id, id),
                original_start_at = COALESCE(original_start_at, start_at),
                original_end_at = COALESCE(original_end_at, end_at)
-           WHERE locked_at IS NULL AND start_at >= ? AND start_at < ?
+           WHERE locked_at IS NULL AND amendment_window_id IS NULL
+             AND start_at >= ? AND start_at < ?
              AND end_at IS NOT NULL AND end_at <= ?`,
         )
         .bind(timestamp, periodId, timestamp, input.coverageFrom, input.cutoffAt, input.cutoffAt),
@@ -1275,6 +1281,14 @@ export async function correctLockedEntry(input: {
     .bind(before.close_period_id)
     .first<{ coverage_from: number; cutoff_at: number; suppress_delivery: number }>();
   if (!period) throw new Error('Close period not found');
+  const activeAmendment = await input.db
+    .prepare(
+      `SELECT id FROM close_amendment_windows
+       WHERE close_period_id = ? AND status IN ('open', 'finalizing') LIMIT 1`,
+    )
+    .bind(before.close_period_id)
+    .first<{ id: string }>();
+  if (activeAmendment) throw new Error('AMENDMENT_CORRECTION_CONFLICT');
 
   const after = {
     ...before,

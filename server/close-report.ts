@@ -933,6 +933,8 @@ interface SaveCloseReportVersionInput {
   createdByUserId?: string | null;
   /** Link pending audited corrections in the same atomic batch as this version. */
   correctionIdsToLink?: string[];
+  /** Idempotency link for one finalized late-entry amendment window. */
+  amendmentWindowId?: string;
   now?: Date;
 }
 
@@ -991,8 +993,8 @@ async function saveCloseReportVersionAttempt(
         `INSERT INTO report_versions
          (id, close_period_id, version, supersedes_report_id, snapshot_json,
           snapshot_sha256, entry_count, total_ms, source_revision, correction_reason,
-          created_by_user_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          created_by_user_id, created_at, amendment_window_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         reportId,
@@ -1007,6 +1009,7 @@ async function saveCloseReportVersionAttempt(
         (input.correctionReason ?? '').slice(0, 1000),
         input.createdByUserId ?? null,
         timestamp,
+        input.amendmentWindowId ?? null,
       ),
   ];
   if (correctionIdsToLink.length) {

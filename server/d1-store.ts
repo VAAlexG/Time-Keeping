@@ -14,7 +14,8 @@ import type {
   UserRole,
   WorkClassificationInput,
 } from './types';
-import { latestFridayCutoff } from './time';
+import { DateTime } from 'luxon';
+import { BRISBANE_ZONE, latestFridayCutoff } from './time';
 
 interface ProjectRow {
   id: string;
@@ -60,6 +61,12 @@ interface ActivityRow {
   id: string;
   name: string;
   active: number;
+}
+interface OpenAmendmentRow {
+  id: string;
+  close_period_id: string;
+  coverage_from: number;
+  cutoff_at: number;
 }
 interface EntryRow {
   id: string;
@@ -286,6 +293,15 @@ interface ResolvedClassification {
   activityName: string | null;
 }
 
+function isSingleBrisbaneDay(startAt: Date, endAt: Date): boolean {
+  if (endAt <= startAt) return false;
+  const startDay = DateTime.fromJSDate(startAt, { zone: 'utc' }).setZone(BRISBANE_ZONE).toISODate();
+  const endDay = DateTime.fromMillis(endAt.getTime() - 1, { zone: 'utc' })
+    .setZone(BRISBANE_ZONE)
+    .toISODate();
+  return startDay !== null && startDay === endDay;
+}
+
 export class D1TimeStore implements TimeStore {
   constructor(
     private readonly db: D1Database,
@@ -306,6 +322,62 @@ export class D1TimeStore implements TimeStore {
     const periodCutoff = control?.period_cutoff || Number.NEGATIVE_INFINITY;
     if (!control?.activated_at) return periodCutoff;
     return Math.max(periodCutoff, control.closed_through, latestFridayCutoff(at).getTime());
+  }
+
+  private async openAmendmentForInterval(
+    userId: string,
+    startAt: Date,
+    endAt: Date,
+  ): Promise<OpenAmendmentRow | null> {
+    return this.db
+      .prepare(
+        `SELECT w.id, w.close_period_id, p.coverage_from, p.cutoff_at
+         FROM close_amendment_windows w
+         JOIN close_periods p ON p.id = w.close_period_id
+         WHERE w.user_id = ? AND w.status = 'open'
+           AND (w.expires_at IS NULL OR w.expires_at >= ?)
+           AND ? >= p.coverage_from AND ? <= p.cutoff_at AND ? < ?
+         ORDER BY p.cutoff_at DESC LIMIT 1`,
+      )
+      .bind(
+        userId,
+        this.now().getTime(),
+        startAt.getTime(),
+        endAt.getTime(),
+        startAt.getTime(),
+        endAt.getTime(),
+      )
+      .first<OpenAmendmentRow>();
+  }
+
+  private async openAmendmentForEntry(
+    userId: string,
+    entryId: string,
+    startAt: Date,
+    endAt: Date,
+  ): Promise<OpenAmendmentRow | null> {
+    return this.db
+      .prepare(
+        `SELECT w.id, w.close_period_id, p.coverage_from, p.cutoff_at
+         FROM time_entries e
+         JOIN close_amendment_windows w ON w.id = e.amendment_window_id
+         JOIN close_periods p ON p.id = w.close_period_id
+         WHERE e.id = ? AND e.user_id = ? AND e.locked_at IS NULL
+           AND w.user_id = e.user_id AND w.status = 'open'
+           AND (w.expires_at IS NULL OR w.expires_at >= ?)
+           AND ? >= p.coverage_from AND ? <= p.cutoff_at AND ? < ?
+         LIMIT 1`,
+      )
+      .bind(
+        entryId,
+        userId,
+        this.now().getTime(),
+        startAt.getTime(),
+        endAt.getTime(),
+        startAt.getTime(),
+        endAt.getTime(),
+      )
+      .first<OpenAmendmentRow>();
   }
 
   async upsertUser(input: {
@@ -589,20 +661,28 @@ export class D1TimeStore implements TimeStore {
     endAt: Date | null,
     clientDescription = '',
   ): Promise<TimeEntry> {
-    if (startAt.getTime() < (await this.effectiveLockCutoff())) throw new Error('LOCKED_PERIOD');
+    const lockCutoff = await this.effectiveLockCutoff();
+    if (startAt.getTime() < lockCutoff && endAt && !isSingleBrisbaneDay(startAt, endAt))
+      throw new Error('AMENDMENT_SINGLE_DAY_REQUIRED');
+    const amendment =
+      startAt.getTime() < lockCutoff && endAt
+        ? await this.openAmendmentForInterval(userId, startAt, endAt)
+        : null;
+    if (startAt.getTime() < lockCutoff && !amendment) throw new Error('LOCKED_PERIOD');
     const resolved = await this.resolveClassification(classification);
     const project = await this.getOrCreateProject(resolved.projectName);
     const id = crypto.randomUUID();
     const timestamp = this.now().getTime();
     try {
-      await this.db
+      const insert = this.db
         .prepare(
           `INSERT INTO time_entries (id, user_id, project_id, notes, client_description, start_at, end_at,
         active_guard, created_at, updated_at, work_type, client_id, job_id, internal_activity_id, billable,
         client_name_snapshot, client_external_id_snapshot, client_code_snapshot, job_name_snapshot,
         job_external_id_snapshot, job_code_snapshot, activity_name_snapshot, legacy_project_name_snapshot,
-        segment_root_id, segment_parent_id, segment_index, original_start_at, original_end_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, 0, ?, ?)`,
+        segment_root_id, segment_parent_id, segment_index, original_start_at, original_end_at,
+        amendment_window_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, 0, ?, ?, ?)`,
         )
         .bind(
           id,
@@ -630,8 +710,30 @@ export class D1TimeStore implements TimeStore {
           id,
           startAt.getTime(),
           endAt?.getTime() ?? null,
-        )
-        .run();
+          amendment?.id ?? null,
+        );
+      if (amendment) {
+        const details = JSON.stringify({
+          entryId: id,
+          closePeriodId: amendment.close_period_id,
+          startAt: startAt.toISOString(),
+          endAt: endAt!.toISOString(),
+          workType: resolved.workType,
+          billable: resolved.billable,
+        });
+        await this.db.batch([
+          insert,
+          this.db
+            .prepare(
+              `INSERT INTO close_amendment_audit
+               (id, window_id, actor_user_id, action, entry_id, details_json, created_at)
+               VALUES (?, ?, ?, 'draft.created', ?, ?, ?)`,
+            )
+            .bind(crypto.randomUUID(), amendment.id, userId, id, details, timestamp),
+        ]);
+      } else {
+        await insert.run();
+      }
     } catch (error) {
       if (!endAt && (await this.getActiveEntry(userId))) throw new Error('ACTIVE_TIMER_EXISTS');
       throw error;
@@ -696,15 +798,20 @@ export class D1TimeStore implements TimeStore {
     const existing = await this.getEntry(id, userId);
     if (!existing || !existing.endAt) return null;
     const cutoff = await this.effectiveLockCutoff();
-    if (
-      existing.lockedAt ||
-      Date.parse(existing.startAt) < cutoff ||
-      input.startAt.getTime() < cutoff
-    )
-      throw new Error('LOCKED_ENTRY');
+    const historic = Date.parse(existing.startAt) < cutoff || input.startAt.getTime() < cutoff;
+    if (historic && !isSingleBrisbaneDay(input.startAt, input.endAt))
+      throw new Error('AMENDMENT_SINGLE_DAY_REQUIRED');
+    const amendment = historic
+      ? await this.openAmendmentForEntry(userId, id, input.startAt, input.endAt)
+      : null;
+    if (existing.lockedAt || (historic && !amendment)) throw new Error('LOCKED_ENTRY');
     const resolved = await this.resolveClassification(input);
     const project = await this.getOrCreateProject(resolved.projectName);
-    const result = await this.db
+    const timestamp = this.now().getTime();
+    const expectedRevision = amendment
+      ? (input.expectedRevision ?? existing.revision)
+      : input.expectedRevision;
+    const update = this.db
       .prepare(
         `UPDATE time_entries SET project_id = ?, notes = ?, client_description = ?, start_at = ?, end_at = ?,
       original_start_at = ?, original_end_at = ?, revision = revision + 1,
@@ -723,7 +830,7 @@ export class D1TimeStore implements TimeStore {
         input.endAt.getTime(),
         input.startAt.getTime(),
         input.endAt.getTime(),
-        this.now().getTime(),
+        timestamp,
         resolved.workType,
         resolved.clientId,
         resolved.jobId,
@@ -738,21 +845,109 @@ export class D1TimeStore implements TimeStore {
         resolved.activityName,
         id,
         userId,
-        input.expectedRevision ?? null,
-        input.expectedRevision ?? null,
-      )
-      .run();
+        expectedRevision ?? null,
+        expectedRevision ?? null,
+      );
+    let result: D1Result<unknown>;
+    if (amendment) {
+      const details = JSON.stringify({
+        before: existing,
+        requested: {
+          startAt: input.startAt.toISOString(),
+          endAt: input.endAt.toISOString(),
+          workType: resolved.workType,
+          clientId: resolved.clientId,
+          jobId: resolved.jobId,
+          internalActivityId: resolved.internalActivityId,
+          billable: resolved.billable,
+          notes: (input.internalNote ?? input.notes ?? '').trim(),
+          clientDescription: (input.clientDescription ?? '').trim(),
+        },
+      });
+      const results = await this.db.batch([
+        this.db
+          .prepare(
+            `INSERT INTO close_amendment_audit
+             (id, window_id, actor_user_id, action, entry_id, details_json, created_at)
+             SELECT ?, amendment_window_id, ?, 'draft.updated', id, ?, ?
+             FROM time_entries
+             WHERE id = ? AND user_id = ? AND amendment_window_id = ?
+               AND locked_at IS NULL AND revision = ?`,
+          )
+          .bind(
+            crypto.randomUUID(),
+            userId,
+            details,
+            timestamp,
+            id,
+            userId,
+            amendment.id,
+            expectedRevision!,
+          ),
+        update,
+      ]);
+      result = results[1];
+    } else {
+      result = await update.run();
+    }
+    if (amendment && !result.meta.changes) throw new Error('ENTRY_REVISION_CONFLICT');
     return result.meta.changes ? this.getEntry(id, userId) : null;
   }
   async deleteEntry(userId: string, id: string): Promise<boolean> {
     const existing = await this.getEntry(id, userId);
     if (!existing) return false;
-    if (existing.lockedAt || Date.parse(existing.startAt) < (await this.effectiveLockCutoff()))
-      throw new Error('LOCKED_ENTRY');
-    const result = await this.db
-      .prepare('DELETE FROM time_entries WHERE id = ? AND user_id = ? AND locked_at IS NULL')
-      .bind(id, userId)
-      .run();
+    const historic = Date.parse(existing.startAt) < (await this.effectiveLockCutoff());
+    const amendment =
+      historic && existing.endAt
+        ? await this.openAmendmentForEntry(
+            userId,
+            id,
+            new Date(existing.startAt),
+            new Date(existing.endAt),
+          )
+        : null;
+    if (existing.lockedAt || (historic && !amendment)) throw new Error('LOCKED_ENTRY');
+    const remove = amendment
+      ? this.db
+          .prepare(
+            `DELETE FROM time_entries
+             WHERE id = ? AND user_id = ? AND locked_at IS NULL
+               AND amendment_window_id = ? AND revision = ?`,
+          )
+          .bind(id, userId, amendment.id, existing.revision)
+      : this.db
+          .prepare('DELETE FROM time_entries WHERE id = ? AND user_id = ? AND locked_at IS NULL')
+          .bind(id, userId);
+    let result: D1Result<unknown>;
+    if (amendment) {
+      const timestamp = this.now().getTime();
+      const results = await this.db.batch([
+        this.db
+          .prepare(
+            `INSERT INTO close_amendment_audit
+             (id, window_id, actor_user_id, action, entry_id, details_json, created_at)
+             SELECT ?, amendment_window_id, ?, 'draft.deleted', id, ?, ?
+             FROM time_entries
+             WHERE id = ? AND user_id = ? AND amendment_window_id = ?
+               AND locked_at IS NULL AND revision = ?`,
+          )
+          .bind(
+            crypto.randomUUID(),
+            userId,
+            JSON.stringify({ before: existing }),
+            timestamp,
+            id,
+            userId,
+            amendment.id,
+            existing.revision,
+          ),
+        remove,
+      ]);
+      result = results[1];
+    } else {
+      result = await remove.run();
+    }
+    if (amendment && !result.meta.changes) throw new Error('ENTRY_REVISION_CONFLICT');
     return Boolean(result.meta.changes);
   }
   async listEntries(input: EntryFilters): Promise<TimeEntry[]> {
@@ -774,6 +969,8 @@ export class D1TimeStore implements TimeStore {
       where.push('e.billable = ?');
       bindings.push(Number(input.billable));
     }
+    if (input.excludeAmendmentDrafts)
+      where.push('NOT (e.amendment_window_id IS NOT NULL AND e.locked_at IS NULL)');
     const result = await this.db
       .prepare(`${ENTRY_SELECT} WHERE ${where.join(' AND ')} ORDER BY e.start_at DESC`)
       .bind(...bindings)

@@ -162,6 +162,8 @@ export interface EntryFilters {
   internalActivityId?: string;
   workType?: WorkType;
   billable?: boolean;
+  /** Hide only unlocked amendment drafts; finalized amendment entries remain reportable. */
+  excludeAmendmentDrafts?: boolean;
 }
 
 export type DeliveryType = 'scheduled' | 'test';

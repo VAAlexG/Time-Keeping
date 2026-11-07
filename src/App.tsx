@@ -61,6 +61,41 @@ type WorkForm = {
   clientDescription: string;
   internalNote: string;
 };
+type CloseAmendmentStatus = 'open' | 'finalizing' | 'closed' | 'revoked';
+type CloseAmendmentWindow = {
+  id: string;
+  closePeriodId: string;
+  userId: string;
+  userEmail?: string;
+  userDisplayName?: string;
+  coverageFrom: string;
+  cutoffAt: string;
+  reason: string;
+  status: CloseAmendmentStatus;
+  draftEntryCount: number;
+  draftTotalMs: number;
+  openedAt?: string;
+  expiresAt: string | null;
+  closedAt?: string | null;
+  reportId?: string | null;
+};
+type CloseAmendmentPeriod = {
+  id: string;
+  coverageFrom: string;
+  cutoffAt: string;
+  entryCount: number;
+  totalMs: number;
+};
+type CloseAmendmentUser = {
+  id: string;
+  email: string;
+  displayName: string;
+};
+type CloseAmendmentAdminData = {
+  periods: CloseAmendmentPeriod[];
+  users: CloseAmendmentUser[];
+  windows: CloseAmendmentWindow[];
+};
 
 // Exported for focused presentation-contract tests alongside the app component.
 // eslint-disable-next-line react-refresh/only-export-components
@@ -75,6 +110,117 @@ export function formatBrisbaneDateTime(value: string): string {
     minute: '2-digit',
   }).format(new Date(value));
   return `${formatted} Brisbane`;
+}
+
+// Exported for focused presentation-contract tests alongside the app component.
+// eslint-disable-next-line react-refresh/only-export-components
+export function amendmentIntervalError(
+  window: Pick<CloseAmendmentWindow, 'coverageFrom' | 'cutoffAt'>,
+  startAt: string,
+  endAt: string,
+): string | null {
+  const coverage = Date.parse(window.coverageFrom);
+  const cutoff = Date.parse(window.cutoffAt);
+  const start = Date.parse(startAt);
+  const end = Date.parse(endAt);
+  if (
+    !Number.isFinite(coverage) ||
+    !Number.isFinite(cutoff) ||
+    !Number.isFinite(start) ||
+    !Number.isFinite(end) ||
+    end <= start ||
+    start < coverage ||
+    end > cutoff
+  ) {
+    return 'The entire completed entry must fall inside the closed-week amendment window.';
+  }
+  if (localDate(startAt) !== localDate(new Date(end - 1).toISOString())) {
+    return 'A late-entry draft cannot cross a Brisbane calendar day. Split it into separate entries.';
+  }
+  return null;
+}
+
+// Exported for focused presentation-contract tests alongside the app component.
+// eslint-disable-next-line react-refresh/only-export-components
+export function amendmentDefaultStart(
+  window: Pick<CloseAmendmentWindow, 'coverageFrom' | 'cutoffAt'>,
+): string {
+  const coverage = Date.parse(window.coverageFrom);
+  const cutoff = Date.parse(window.cutoffAt);
+  const firstDay = localDate(window.coverageFrom);
+  const lastDay = localDate(new Date(Math.max(coverage, cutoff - 1)).toISOString());
+  const cursor = new Date(`${firstDay}T00:00:00.000Z`);
+  const last = new Date(`${lastDay}T00:00:00.000Z`);
+
+  while (cursor <= last) {
+    const date = cursor.toISOString().slice(0, 10);
+    const weekday = cursor.getUTCDay();
+    const startAt = new Date(`${date}T09:00:00+10:00`);
+    const endAt = new Date(startAt.getTime() + 60 * 60_000);
+    if (
+      weekday >= 1 &&
+      weekday <= 5 &&
+      !amendmentIntervalError(window, startAt.toISOString(), endAt.toISOString())
+    ) {
+      return `${date}T09:00`;
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+
+  for (let candidate = cutoff - 60 * 60_000; candidate >= coverage; candidate -= 30 * 60_000) {
+    const startAt = new Date(candidate);
+    const endAt = new Date(candidate + 60 * 60_000);
+    if (!amendmentIntervalError(window, startAt.toISOString(), endAt.toISOString())) {
+      return toBrisbaneLocalInput(startAt.toISOString());
+    }
+  }
+
+  return toBrisbaneLocalInput(window.coverageFrom);
+}
+
+function AmendmentWindowBanner({
+  window,
+  onAddTime,
+}: {
+  window: CloseAmendmentWindow;
+  onAddTime: () => void;
+}) {
+  return (
+    <section className="amendment-banner" aria-labelledby="amendment-window-title">
+      <div className="amendment-banner-copy">
+        <p className="eyebrow">Audited late-entry window</p>
+        <h2 id="amendment-window-title">Your closed week is open for missing time</h2>
+        <p>
+          Add completed entries dated between{' '}
+          <strong>{formatBrisbaneDateTime(window.coverageFrom)}</strong> and{' '}
+          <strong>{formatBrisbaneDateTime(window.cutoffAt)}</strong>. Entries stay in draft until an
+          administrator finalizes one superseding report.
+        </p>
+        <p className="amendment-reason">Reason: {window.reason}</p>
+      </div>
+      <dl className="amendment-stats">
+        <div>
+          <dt>Draft entries</dt>
+          <dd>{window.draftEntryCount}</dd>
+        </div>
+        <div>
+          <dt>Draft time</dt>
+          <dd>{formatDuration(window.draftTotalMs)}</dd>
+        </div>
+        <div>
+          <dt>Window closes</dt>
+          <dd>{window.expiresAt ? formatBrisbaneDateTime(window.expiresAt) : 'When finalized'}</dd>
+        </div>
+      </dl>
+      <button className="button gold" onClick={onAddTime}>
+        + Add completed time
+      </button>
+    </section>
+  );
+}
+
+function brisbaneLocalInputToIso(value: string): string {
+  return new Date(`${value}:00+10:00`).toISOString();
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -537,12 +683,14 @@ function EntryRows({
 
 function EntryDialog({
   entry,
+  amendmentWindow,
   catalog,
   user,
   onClose,
   onSave,
 }: {
   entry: Entry | null;
+  amendmentWindow?: CloseAmendmentWindow | null;
   catalog: Catalog;
   user: SignedInUser;
   onClose: () => void;
@@ -550,7 +698,11 @@ function EntryDialog({
 }) {
   const current = new Date();
   const oneHourAgo = new Date(current.getTime() - 3_600_000);
-  const initialStart = toBrisbaneLocalInput(entry?.startAt ?? oneHourAgo.toISOString());
+  const initialStart = entry
+    ? toBrisbaneLocalInput(entry.startAt)
+    : amendmentWindow
+      ? amendmentDefaultStart(amendmentWindow)
+      : toBrisbaneLocalInput(oneHourAgo.toISOString());
   const initialDurationMinutes = entry?.endAt
     ? Math.max(1, Math.round((Date.parse(entry.endAt) - Date.parse(entry.startAt)) / 60_000))
     : 60;
@@ -601,6 +753,17 @@ function EntryDialog({
       end.getTime() +
         (entry && !durationEdited ? initialExactDurationMs : durationMinutes * 60_000),
     );
+    if (amendmentWindow) {
+      const amendmentError = amendmentIntervalError(
+        amendmentWindow,
+        startInstant.toISOString(),
+        end.toISOString(),
+      );
+      if (amendmentError) {
+        setError(amendmentError);
+        return;
+      }
+    }
     const endLocal = entry && !startEdited && !durationEdited ? entry.endAt! : end.toISOString();
     setSaving(true);
     try {
@@ -626,11 +789,21 @@ function EntryDialog({
       role="presentation"
       onMouseDown={(event) => event.target === event.currentTarget && onClose()}
     >
-      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="entry-title">
+      <section
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="entry-title"
+        aria-describedby={amendmentWindow ? 'amendment-entry-guidance' : undefined}
+      >
         <div className="modal-heading">
           <div>
-            <p className="eyebrow">Completed time</p>
-            <h2 id="entry-title">{entry ? 'Edit entry' : 'Add time entry'}</h2>
+            <p className="eyebrow">
+              {amendmentWindow ? 'Closed-week amendment' : 'Completed time'}
+            </p>
+            <h2 id="entry-title">
+              {entry ? 'Edit entry' : amendmentWindow ? 'Add draft time entry' : 'Add time entry'}
+            </h2>
           </div>
           <button className="icon-button" onClick={onClose} aria-label="Close">
             ×
@@ -643,6 +816,20 @@ function EntryDialog({
           <div className="message warning">
             This time is in a closed period. Saving creates an audited correction and revised
             report; the original version remains in the history.
+          </div>
+        )}
+        {amendmentWindow && (
+          <div className="message warning amendment-entry-warning" id="amendment-entry-guidance">
+            <strong>Only completed time inside this closed week can be added.</strong>
+            <span>
+              Exact coverage: {formatBrisbaneDateTime(amendmentWindow.coverageFrom)} to{' '}
+              {formatBrisbaneDateTime(amendmentWindow.cutoffAt)}.
+            </span>
+            <span>
+              The full interval must stay within that coverage and one Brisbane calendar day. It
+              will save as a draft and remain unlocked from reporting until an administrator
+              finalizes the superseding report.
+            </span>
           </div>
         )}
         <form onSubmit={submit} className="form-grid">
@@ -659,6 +846,19 @@ function EntryDialog({
             <input
               type="date"
               value={workDate}
+              min={amendmentWindow ? localDate(amendmentWindow.coverageFrom) : undefined}
+              max={
+                amendmentWindow
+                  ? localDate(
+                      new Date(
+                        Math.max(
+                          Date.parse(amendmentWindow.coverageFrom),
+                          Date.parse(amendmentWindow.cutoffAt) - 1,
+                        ),
+                      ).toISOString(),
+                    )
+                  : undefined
+              }
               onChange={(event) => {
                 setWorkDate(event.target.value);
                 setStartEdited(true);
@@ -742,7 +942,7 @@ function EntryDialog({
               Cancel
             </button>
             <button className="button primary" disabled={saving}>
-              {saving ? 'Saving...' : 'Save entry'}
+              {saving ? 'Saving...' : amendmentWindow ? 'Save draft entry' : 'Save entry'}
             </button>
           </div>
         </form>
@@ -3464,19 +3664,46 @@ function XeroProjectsSetup({ csrf }: { csrf: string }) {
   );
 }
 
-function Practice({ csrf }: { csrf: string }) {
+function Practice({
+  csrf,
+  onAmendmentChanged,
+}: {
+  csrf: string;
+  onAmendmentChanged: () => Promise<void> | void;
+}) {
   const [data, setData] = useState<PracticeData | null>(null);
   const [exceptions, setExceptions] = useState<{ entry: Entry; reasons: string[] }[]>([]);
+  const [amendments, setAmendments] = useState<CloseAmendmentAdminData | null>(null);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [newActivity, setNewActivity] = useState('');
+  const [amendmentBusy, setAmendmentBusy] = useState('');
+  const [amendmentMessage, setAmendmentMessage] = useState('');
+  const [amendmentError, setAmendmentError] = useState('');
+  const [amendmentForm, setAmendmentForm] = useState({
+    closePeriodId: '',
+    userId: '',
+    reason: '',
+    expiresAt: toBrisbaneLocalInput(new Date(Date.now() + 7 * 86_400_000).toISOString()),
+  });
   const load = useCallback(async () => {
-    const [practice, exceptionData] = await Promise.all([
+    const [practice, exceptionData, amendmentData] = await Promise.all([
       api<PracticeData>('/api/admin/practice'),
       api<{ exceptions: { entry: Entry; reasons: string[] }[] }>('/api/admin/exceptions'),
+      api<CloseAmendmentAdminData>('/api/admin/close-amendments'),
     ]);
     setData(practice);
     setExceptions(exceptionData.exceptions);
+    setAmendments(amendmentData);
+    setAmendmentForm((current) => ({
+      ...current,
+      closePeriodId: amendmentData.periods.some((period) => period.id === current.closePeriodId)
+        ? current.closePeriodId
+        : (amendmentData.periods[0]?.id ?? ''),
+      userId: amendmentData.users.some((item) => item.id === current.userId)
+        ? current.userId
+        : (amendmentData.users[0]?.id ?? ''),
+    }));
   }, []);
   useEffect(() => {
     void load();
@@ -3530,12 +3757,229 @@ function Practice({ csrf }: { csrf: string }) {
     );
     await load();
   }
-  if (!data) return <div className="loading">Loading practice settings...</div>;
+  async function openAmendmentWindow(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (
+      !amendmentForm.closePeriodId ||
+      !amendmentForm.userId ||
+      amendmentForm.reason.trim().length < 5
+    ) {
+      setAmendmentError('Choose a closed period and staff member, then enter a clear reason.');
+      return;
+    }
+    setAmendmentBusy('open');
+    setAmendmentMessage('');
+    setAmendmentError('');
+    try {
+      await api(
+        '/api/admin/close-amendments',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            closePeriodId: amendmentForm.closePeriodId,
+            userId: amendmentForm.userId,
+            reason: amendmentForm.reason.trim(),
+            expiresAt: amendmentForm.expiresAt
+              ? brisbaneLocalInputToIso(amendmentForm.expiresAt)
+              : undefined,
+          }),
+        },
+        csrf,
+      );
+      setAmendmentMessage(
+        'Late-entry window opened. The staff member can now add completed time as drafts.',
+      );
+      setAmendmentForm((current) => ({ ...current, reason: '' }));
+      await load();
+      await onAmendmentChanged();
+    } catch (caught) {
+      setAmendmentError(
+        caught instanceof Error ? caught.message : 'Unable to open the late-entry window.',
+      );
+    } finally {
+      setAmendmentBusy('');
+    }
+  }
+  async function finalizeAmendmentWindow(window: CloseAmendmentWindow) {
+    const staff = amendments?.users.find((item) => item.id === window.userId);
+    if (
+      !globalThis.window.confirm(
+        `Finalize ${staff?.displayName ?? staff?.email ?? 'this staff member'}'s late-entry window? ` +
+          `${window.draftEntryCount} draft ${window.draftEntryCount === 1 ? 'entry' : 'entries'} ` +
+          `(${formatDuration(window.draftTotalMs)}) will lock, and one superseding PDF, CSV and XLSX report will be queued to the configured recipients. This cannot be undone.`,
+      )
+    )
+      return;
+    setAmendmentBusy(window.id);
+    setAmendmentMessage('');
+    setAmendmentError('');
+    try {
+      await api(
+        `/api/admin/close-amendments/${window.id}/finalize`,
+        { method: 'POST', body: JSON.stringify({ reason: window.reason }) },
+        csrf,
+      );
+      setAmendmentMessage(
+        'Amendment finalized. Drafts are locked and the superseding report is queued.',
+      );
+      await load();
+      await onAmendmentChanged();
+    } catch (caught) {
+      setAmendmentError(
+        caught instanceof Error ? caught.message : 'Unable to finalize the late-entry window.',
+      );
+    } finally {
+      setAmendmentBusy('');
+    }
+  }
+  if (!data || !amendments) return <div className="loading">Loading practice settings...</div>;
   const syncSummary = data.latestSync
     ? `${data.latestSync.status} ${new Date(data.latestSync.startedAt).toLocaleString('en-AU')}`
     : 'Never synced';
   return (
     <div className="practice-grid">
+      <section className="panel span-wide amendment-admin" aria-labelledby="amendment-admin-title">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Audited late entries</p>
+            <h2 id="amendment-admin-title">Closed-week amendments</h2>
+          </div>
+        </div>
+        <div className="message warning amendment-warning">
+          Opening a window does not change the original locked report and sends no email. Completed
+          entries added by the selected staff member remain drafts until an administrator finalizes
+          one superseding report.
+        </div>
+        <form className="amendment-admin-form" onSubmit={openAmendmentWindow}>
+          <label>
+            Closed period
+            <select
+              required
+              value={amendmentForm.closePeriodId}
+              onChange={(event) =>
+                setAmendmentForm((current) => ({
+                  ...current,
+                  closePeriodId: event.target.value,
+                }))
+              }
+            >
+              <option value="">Select a closed period</option>
+              {amendments.periods.map((period) => (
+                <option key={period.id} value={period.id}>
+                  {formatBrisbaneDateTime(period.coverageFrom)} –{' '}
+                  {formatBrisbaneDateTime(period.cutoffAt)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Staff member
+            <select
+              required
+              value={amendmentForm.userId}
+              onChange={(event) =>
+                setAmendmentForm((current) => ({ ...current, userId: event.target.value }))
+              }
+            >
+              <option value="">Select a staff member</option>
+              {amendments.users.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.displayName || item.email}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Window expiry <span className="muted">(optional)</span>
+            <input
+              type="datetime-local"
+              value={amendmentForm.expiresAt}
+              onChange={(event) =>
+                setAmendmentForm((current) => ({ ...current, expiresAt: event.target.value }))
+              }
+            />
+            <span className="field-hint">Brisbane time</span>
+          </label>
+          <label className="amendment-reason-field">
+            Reason
+            <textarea
+              required
+              minLength={5}
+              maxLength={500}
+              rows={3}
+              value={amendmentForm.reason}
+              onChange={(event) =>
+                setAmendmentForm((current) => ({ ...current, reason: event.target.value }))
+              }
+              placeholder="Why does this closed week need late entries?"
+            />
+          </label>
+          <div className="amendment-form-action">
+            <button className="button gold" disabled={Boolean(amendmentBusy)}>
+              {amendmentBusy === 'open' ? 'Opening...' : 'Open late-entry window'}
+            </button>
+          </div>
+        </form>
+        {amendmentError && (
+          <div className="message error" role="alert">
+            {amendmentError}
+          </div>
+        )}
+        {amendmentMessage && (
+          <div className="message success" role="status">
+            {amendmentMessage}
+          </div>
+        )}
+        <div className="amendment-open-windows">
+          <h3>Open windows</h3>
+          {amendments.windows.some(
+            (window) => window.status === 'open' || window.status === 'finalizing',
+          ) ? (
+            <div className="amendment-window-list">
+              {amendments.windows
+                .filter((window) => window.status === 'open' || window.status === 'finalizing')
+                .map((window) => {
+                  const staff = amendments.users.find((item) => item.id === window.userId);
+                  return (
+                    <article className="amendment-window-row" key={window.id}>
+                      <div>
+                        <strong>
+                          {staff?.displayName || staff?.email || 'Unknown staff member'}
+                        </strong>
+                        <span>
+                          {formatBrisbaneDateTime(window.coverageFrom)} –{' '}
+                          {formatBrisbaneDateTime(window.cutoffAt)}
+                        </span>
+                        <span>Reason: {window.reason}</span>
+                        <span>
+                          {window.draftEntryCount} draft{' '}
+                          {window.draftEntryCount === 1 ? 'entry' : 'entries'} ·{' '}
+                          {formatDuration(window.draftTotalMs)} · Expires{' '}
+                          {window.expiresAt
+                            ? formatBrisbaneDateTime(window.expiresAt)
+                            : 'when finalized'}
+                        </span>
+                      </div>
+                      <button
+                        className="button primary"
+                        disabled={Boolean(amendmentBusy) || window.status !== 'open'}
+                        onClick={() => void finalizeAmendmentWindow(window)}
+                      >
+                        {window.status === 'finalizing'
+                          ? 'Finalizing...'
+                          : amendmentBusy === window.id
+                            ? 'Finalizing...'
+                            : 'Finalize and queue report'}
+                      </button>
+                    </article>
+                  );
+                })}
+            </div>
+          ) : (
+            <div className="empty">No late-entry windows are open.</div>
+          )}
+        </div>
+      </section>
       <section className="panel span-wide">
         <div className="panel-heading">
           <div>
@@ -3675,6 +4119,7 @@ export default function App() {
   const [user, setUser] = useState<SignedInUser | null>(null);
   const [users, setUsers] = useState<SignedInUser[]>([]);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+  const [amendmentWindow, setAmendmentWindow] = useState<CloseAmendmentWindow | null>(null);
   const [view, setView] = useState<View>('dashboard');
   const [now, setNow] = useState(Date.now());
   const [loading, setLoading] = useState(true);
@@ -3683,11 +4128,19 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Entry | null>(null);
+  const [entryAmendmentWindow, setEntryAmendmentWindow] = useState<CloseAmendmentWindow | null>(
+    null,
+  );
   const [version, setVersion] = useState(0);
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      setDashboard(await api('/api/dashboard'));
+      const [dashboardData, amendmentData] = await Promise.all([
+        api<DashboardData>('/api/dashboard'),
+        api<{ window: CloseAmendmentWindow | null }>('/api/close-amendments/current'),
+      ]);
+      setDashboard(dashboardData);
+      setAmendmentWindow(amendmentData.window?.status === 'open' ? amendmentData.window : null);
       setError('');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to load time.');
@@ -3723,13 +4176,27 @@ export default function App() {
   }, []);
   function openNew() {
     setEditing(null);
+    setEntryAmendmentWindow(null);
+    setDialogOpen(true);
+  }
+  function openAmendmentNew() {
+    if (!amendmentWindow) return;
+    setEditing(null);
+    setEntryAmendmentWindow(amendmentWindow);
     setDialogOpen(true);
   }
   function openEdit(entry: Entry) {
     setEditing(entry);
+    setEntryAmendmentWindow(null);
     setDialogOpen(true);
   }
+  function closeEntryDialog() {
+    setDialogOpen(false);
+    setEditing(null);
+    setEntryAmendmentWindow(null);
+  }
   async function saveEntry(data: WorkPayload & ManualEntryPayload) {
+    const savesAmendmentDraft = Boolean(entryAmendmentWindow);
     const lockedCorrection = Boolean(editing?.lockedAt);
     const path = lockedCorrection
       ? `/api/entries/${editing!.id}/corrections`
@@ -3742,14 +4209,15 @@ export default function App() {
       csrf,
     );
     const edited = Boolean(editing);
-    setDialogOpen(false);
-    setEditing(null);
+    closeEntryDialog();
     setNotice(
       result.xeroWarning
-        ? `${edited ? 'Entry updated' : 'Time entry added'} locally. Xero selection needs attention: ${result.xeroWarning}`
-        : edited
-          ? 'Entry updated.'
-          : 'Time entry added.',
+        ? `${savesAmendmentDraft ? 'Draft amendment entry saved' : edited ? 'Entry updated' : 'Time entry added'} locally. Xero selection needs attention: ${result.xeroWarning}`
+        : savesAmendmentDraft
+          ? 'Draft amendment entry saved. It will lock only when the superseding report is finalized.'
+          : edited
+            ? 'Entry updated.'
+            : 'Time entry added.',
     );
     await refresh();
     setVersion((value) => value + 1);
@@ -3855,6 +4323,9 @@ export default function App() {
             {error}
           </div>
         )}
+        {amendmentWindow && (view === 'dashboard' || view === 'history') && (
+          <AmendmentWindowBanner window={amendmentWindow} onAddTime={openAmendmentNew} />
+        )}
         {loading && !dashboard ? (
           <div className="loading">Loading your time...</div>
         ) : (
@@ -3893,16 +4364,23 @@ export default function App() {
           ) : view === 'schedule' ? (
             <Schedule csrf={csrf} />
           ) : (
-            <Practice csrf={csrf} />
+            <Practice
+              csrf={csrf}
+              onAmendmentChanged={async () => {
+                await refresh();
+                setVersion((value) => value + 1);
+              }}
+            />
           ))
         )}
       </main>
       {dialogOpen && dashboard && (
         <EntryDialog
           entry={editing}
+          amendmentWindow={entryAmendmentWindow}
           catalog={dashboard.catalog}
           user={user}
-          onClose={() => setDialogOpen(false)}
+          onClose={closeEntryDialog}
           onSave={saveEntry}
         />
       )}
